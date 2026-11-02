@@ -184,6 +184,8 @@ likely cause or review notes, and labels. A maintainer reviews everything. Items
 secrets) are closed automatically. If that happens to you by mistake, say so in a comment and a
 maintainer can reopen it.
 
+Found a security problem? Please report it privately, as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 [GPL-3.0](LICENSE). You can use, modify and share it, but distributed modifications must stay

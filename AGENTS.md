@@ -276,6 +276,11 @@ Optional checks when relevant:
   `cargo clippy --release --target x86_64-pc-windows-gnu -- -D warnings`.
 - **Dockerfile / entrypoint changes:** `docker build -t kick-level-farm:dev .`
 - **Workflow changes:** `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest`
+- **Dependency changes:** `cargo deny check` (cargo-deny, configured in `deny.toml`). New
+  dependencies must have a GPL-3.0-compatible license from the allowlist there.
+
+CI also runs CodeQL (Rust and workflows) and cargo-deny, and Dependabot opens update PRs. Fix
+or explain any alerts they raise instead of suppressing them.
 
 ### Verify against live Kick
 
