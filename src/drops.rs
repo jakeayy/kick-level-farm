@@ -66,7 +66,8 @@ pub fn plan(
     skipped: &mut HashMap<String, String>,
 ) -> Vec<DropPlan> {
     let now = chrono::Utc::now();
-    let progress: HashMap<&str, &DropCampaign> = progress.iter().map(|p| (p.id.as_str(), p)).collect();
+    let progress: HashMap<&str, &DropCampaign> =
+        progress.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut out = Vec::new();
 
     for c in campaigns {
@@ -79,9 +80,8 @@ pub fn plan(
         let needs_link = !c.connect_url.is_empty();
         let prog = progress.get(c.id.as_str());
         let units = prog.map(|p| p.progress_units).unwrap_or(0);
-        let claimed = |rid: &str| {
-            prog.is_some_and(|p| p.rewards.iter().any(|r| r.id == rid && r.claimed))
-        };
+        let claimed =
+            |rid: &str| prog.is_some_and(|p| p.rewards.iter().any(|r| r.id == rid && r.claimed));
 
         // Rewards still to earn, cheapest first.
         let mut open: Vec<_> = c
@@ -110,7 +110,11 @@ pub fn plan(
             continue;
         }
 
-        let best_kind = open.iter().map(|r| classify(&r.name, needs_link)).min().unwrap_or(RewardKind::Item);
+        let best_kind = open
+            .iter()
+            .map(|r| classify(&r.name, needs_link))
+            .min()
+            .unwrap_or(RewardKind::Item);
         out.push((
             c.ends_at,
             DropPlan {
@@ -130,7 +134,10 @@ pub fn plan(
     out.sort_by(|(ea, a), (eb, b)| {
         a.kind
             .cmp(&b.kind)
-            .then_with(|| ea.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC).cmp(&eb.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)))
+            .then_with(|| {
+                ea.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+                    .cmp(&eb.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC))
+            })
             .then_with(|| a.remaining_minutes.cmp(&b.remaining_minutes))
     });
     out.into_iter().map(|(_, p)| p).collect()

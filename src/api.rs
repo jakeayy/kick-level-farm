@@ -10,7 +10,8 @@ use std::time::Duration;
 
 pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
 /// Public constant shipped in the web bundle as NEXT_PUBLIC_WEBSOCKET_CLIENT_TOKEN.
-pub const WS_CLIENT_TOKEN: &str = "e1393935a959b4020a4491574f6490129f678acdaa92760471263db43487f823";
+pub const WS_CLIENT_TOKEN: &str =
+    "e1393935a959b4020a4491574f6490129f678acdaa92760471263db43487f823";
 pub const VIEWER_WS_URL: &str = "wss://websockets.kick.com/viewer/v1/connect";
 
 const MAIN: &str = "https://kick.com";
@@ -32,7 +33,9 @@ impl std::fmt::Display for ApiError {
             ApiError::Unauthorized => write!(f, "unauthorized — session token invalid or expired"),
             ApiError::NotFound => write!(f, "not found"),
             ApiError::RateLimited => write!(f, "rate limited (429)"),
-            ApiError::Status(s, b) => write!(f, "HTTP {s}: {}", b.chars().take(200).collect::<String>()),
+            ApiError::Status(s, b) => {
+                write!(f, "HTTP {s}: {}", b.chars().take(200).collect::<String>())
+            }
         }
     }
 }
@@ -93,7 +96,11 @@ impl LiveInfo {
 
     pub fn category_names(&self) -> String {
         let n: Vec<&str> = self.categories.iter().map(|c| c.name.as_str()).collect();
-        if n.is_empty() { "?".into() } else { n.join(", ") }
+        if n.is_empty() {
+            "?".into()
+        } else {
+            n.join(", ")
+        }
     }
 }
 
@@ -132,8 +139,10 @@ impl Challenge {
         if matches!(s.as_str(), "claimed" | "expired" | "locked") {
             return false;
         }
-        matches!(s.as_str(), "completed" | "claimable" | "ready" | "ready_to_claim")
-            || (self.condition.threshold > 0 && self.condition.progress >= self.condition.threshold)
+        matches!(
+            s.as_str(),
+            "completed" | "claimable" | "ready" | "ready_to_claim"
+        ) || (self.condition.threshold > 0 && self.condition.progress >= self.condition.threshold)
     }
 }
 
@@ -207,7 +216,8 @@ pub struct DropReward {
 impl DropReward {
     pub fn is_claimable(&self, campaign_units: u64) -> bool {
         !self.claimed
-            && (self.progress >= 0.9999 || (self.required_units > 0 && campaign_units >= self.required_units))
+            && (self.progress >= 0.9999
+                || (self.required_units > 0 && campaign_units >= self.required_units))
     }
 }
 
@@ -261,7 +271,12 @@ impl KickClient {
         self.request_body(Method::POST, url, Some(&body)).await
     }
 
-    async fn request_body<T: DeserializeOwned>(&self, method: Method, url: &str, body: Option<&Value>) -> Result<T> {
+    async fn request_body<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+    ) -> Result<T> {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -288,7 +303,10 @@ impl KickClient {
             if status.is_success() {
                 let body = res.text().await?;
                 return serde_json::from_str(&body).with_context(|| {
-                    format!("decoding {url}: {}", body.chars().take(300).collect::<String>())
+                    format!(
+                        "decoding {url}: {}",
+                        body.chars().take(300).collect::<String>()
+                    )
                 });
             }
             match status {
@@ -330,11 +348,15 @@ impl KickClient {
 
     /// Global account level (the `level` chat badge).
     pub async fn level(&self) -> Result<Level> {
-        Ok(self.get::<Data<Level>>(&format!("{WEB}/v1/gamification/user/level")).await?.data)
+        Ok(self
+            .get::<Data<Level>>(&format!("{WEB}/v1/gamification/user/level"))
+            .await?
+            .data)
     }
 
     pub async fn channel_info(&self, slug: &str) -> Result<ChannelInfo> {
-        self.get(&format!("{MAIN}/api/v2/channels/{slug}/info")).await
+        self.get(&format!("{MAIN}/api/v2/channels/{slug}/info"))
+            .await
     }
 
     /// Channel points balance on a channel.
@@ -343,7 +365,11 @@ impl KickClient {
         struct P {
             points: i64,
         }
-        Ok(self.get::<Data<P>>(&format!("{MAIN}/api/v2/channels/{slug}/points")).await?.data.points)
+        Ok(self
+            .get::<Data<P>>(&format!("{MAIN}/api/v2/channels/{slug}/points"))
+            .await?
+            .data
+            .points)
     }
 
     pub async fn points_settings(&self, slug: &str) -> Result<PointsSettings> {
@@ -356,20 +382,33 @@ impl KickClient {
     }
 
     pub async fn challenges(&self) -> Result<Vec<Challenge>> {
-        Ok(self.get::<Data<Vec<Challenge>>>(&format!("{WEB}/v1/gamification/challenges")).await?.data)
+        Ok(self
+            .get::<Data<Vec<Challenge>>>(&format!("{WEB}/v1/gamification/challenges"))
+            .await?
+            .data)
     }
 
     pub async fn claim_challenge(&self, id: &str) -> Result<Value> {
-        self.request(Method::POST, &format!("{WEB}/v1/gamification/challenges/{id}/claim")).await
+        self.request(
+            Method::POST,
+            &format!("{WEB}/v1/gamification/challenges/{id}/claim"),
+        )
+        .await
     }
 
     /// Watch-progress for drop campaigns you have participated in.
     pub async fn drops_progress(&self) -> Result<Vec<DropCampaign>> {
-        Ok(self.get::<Data<Vec<DropCampaign>>>(&format!("{WEB}/v1/drops/progress")).await?.data)
+        Ok(self
+            .get::<Data<Vec<DropCampaign>>>(&format!("{WEB}/v1/drops/progress"))
+            .await?
+            .data)
     }
 
     pub async fn drop_campaigns(&self) -> Result<Vec<ActiveCampaign>> {
-        Ok(self.get::<Data<Vec<ActiveCampaign>>>(&format!("{WEB}/v1/drops/campaigns")).await?.data)
+        Ok(self
+            .get::<Data<Vec<ActiveCampaign>>>(&format!("{WEB}/v1/drops/campaigns"))
+            .await?
+            .data)
     }
 
     /// Live channel slugs in a category, most viewers first.
@@ -437,19 +476,27 @@ impl KickClient {
             token: String,
         }
         Ok(self
-            .post_json::<Data<T>>(&format!("{WEB}/v1/realtime/auth/channel"), serde_json::json!({"channel": channel}))
+            .post_json::<Data<T>>(
+                &format!("{WEB}/v1/realtime/auth/channel"),
+                serde_json::json!({"channel": channel}),
+            )
             .await?
             .data
             .token)
     }
 
     pub async fn streak(&self) -> Result<Value> {
-        Ok(self.get::<Data<Value>>(&format!("{WEB}/v1/gamification/streak")).await?.data)
+        Ok(self
+            .get::<Data<Value>>(&format!("{WEB}/v1/gamification/streak"))
+            .await?
+            .data)
     }
 
     /// Interval (seconds) the web client uses for `tracking.user.watch.livestream`.
     pub async fn watch_event_interval(&self) -> Result<u64> {
-        let v: Value = self.get(&format!("{MAIN}/api/internal/settings/global")).await?;
+        let v: Value = self
+            .get(&format!("{MAIN}/api/internal/settings/global"))
+            .await?;
         v.pointer("/events/tracking.user.watch.livestream/interval")
             .and_then(Value::as_u64)
             .ok_or_else(|| anyhow!("interval missing from global settings"))
@@ -480,9 +527,15 @@ impl KickClient {
 
     pub async fn popular_streams(&self, lang: &str, limit: u32) -> Result<Vec<PopularStream>> {
         let v: Value = self
-            .get(&format!("{MAIN}/stream/livestreams/{lang}?page=1&limit={limit}&sort=desc"))
+            .get(&format!(
+                "{MAIN}/stream/livestreams/{lang}?page=1&limit={limit}&sort=desc"
+            ))
             .await?;
-        let list = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        let list = v
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         Ok(list
             .iter()
             .filter_map(|s| {

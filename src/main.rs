@@ -9,10 +9,14 @@ mod watcher;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "kick-level-farm", version, about = "Farm Kick.com account levels (XP) and channel points by emulating stream viewing")]
+#[command(
+    name = "kick-level-farm",
+    version,
+    about = "Farm Kick.com account levels (XP) and channel points by emulating stream viewing"
+)]
 struct Cli {
     /// Path to the config file.
     #[arg(short, long, default_value = "config.toml", global = true)]
@@ -61,7 +65,9 @@ fn init_logging(verbose: u8) {
         // No colour codes in `docker logs` / journald.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_target(false)
-        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new("%H:%M:%S".into()))
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new(
+            "%H:%M:%S".into(),
+        ))
         .finish()
         .with(filter)
         .init();
@@ -81,7 +87,10 @@ async fn main() -> Result<()> {
                 anyhow::bail!("{} already exists", cli.config.display());
             }
             std::fs::write(&cli.config, config::EXAMPLE_CONFIG)?;
-            println!("wrote {} — add some streamers, then run `kick-level-farm login`", cli.config.display());
+            println!(
+                "wrote {} — add some streamers, then run `kick-level-farm login`",
+                cli.config.display()
+            );
             Ok(())
         }
         Cmd::Login => login(&cli.config).await,
@@ -92,11 +101,21 @@ async fn main() -> Result<()> {
         }
         Cmd::NotifyTest => {
             let cfg = config::Config::load(&cli.config)?;
-            let n = notify::Notifier::new(cfg.notifications.webhook(), &[notify::NotifyEvent::Started], "kick-level-farm");
+            let n = notify::Notifier::new(
+                cfg.notifications.webhook(),
+                &[notify::NotifyEvent::Started],
+                "kick-level-farm",
+            );
             if !n.enabled() {
-                anyhow::bail!("no Discord webhook configured ([notifications] discord_webhook_url or KICK_DISCORD_WEBHOOK)");
+                anyhow::bail!(
+                    "no Discord webhook configured ([notifications] discord_webhook_url or KICK_DISCORD_WEBHOOK)"
+                );
             }
-            n.send(notify::NotifyEvent::Started, "Test notification", "kick-level-farm can post to this channel ✅");
+            n.send(
+                notify::NotifyEvent::Started,
+                "Test notification",
+                "kick-level-farm can post to this channel ✅",
+            );
             n.flush().await;
             println!("sent — check your Discord channel");
             Ok(())
@@ -130,7 +149,7 @@ async fn main() -> Result<()> {
 }
 
 /// Polls until a (different) token is available. Returns false if we were asked to shut down.
-async fn wait_for_token(config_path: &PathBuf, old: Option<&str>) -> bool {
+async fn wait_for_token(config_path: &Path, old: Option<&str>) -> bool {
     tracing::warn!(
         "waiting for a new session token — run `kick-level-farm login` \
          (docker: `docker compose run --rm kick-level-farm login`)"
@@ -142,18 +161,24 @@ async fn wait_for_token(config_path: &PathBuf, old: Option<&str>) -> bool {
             _ = &mut shutdown => return false,
             _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {}
         }
-        let Ok(cfg) = config::Config::load(config_path) else { continue };
-        if let Ok(t) = cfg.resolve_token() {
-            if Some(t.as_str()) != old {
-                tracing::info!("new session token found, restarting");
-                return true;
-            }
+        let Ok(cfg) = config::Config::load(config_path) else {
+            continue;
+        };
+        if let Ok(t) = cfg.resolve_token()
+            && Some(t.as_str()) != old
+        {
+            tracing::info!("new session token found, restarting");
+            return true;
         }
     }
 }
 
-async fn login(config_path: &PathBuf) -> Result<()> {
-    let cfg = if config_path.exists() { config::Config::load(config_path)? } else { config::Config::default() };
+async fn login(config_path: &Path) -> Result<()> {
+    let cfg = if config_path.exists() {
+        config::Config::load(config_path)?
+    } else {
+        config::Config::default()
+    };
     println!(
         "Kick login uses captcha + 2FA, so the bot reuses your browser session instead.\n\
          1. Log in on https://kick.com\n\
@@ -177,6 +202,10 @@ async fn login(config_path: &PathBuf) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    println!("✓ logged in as {} — token saved to {}", me.username, path.display());
+    println!(
+        "✓ logged in as {} — token saved to {}",
+        me.username,
+        path.display()
+    );
     Ok(())
 }

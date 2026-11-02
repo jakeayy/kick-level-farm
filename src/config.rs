@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Config {
     pub auth: AuthConfig,
     pub farm: FarmConfig,
@@ -36,7 +37,15 @@ pub struct DropsConfig {
 
 impl Default for DropsConfig {
     fn default() -> Self {
-        Self { farm: true, claim: true, badges: true, emotes: true, items: false, slots: 1, exclusive: true }
+        Self {
+            farm: true,
+            claim: true,
+            badges: true,
+            emotes: true,
+            items: false,
+            slots: 1,
+            exclusive: true,
+        }
     }
 }
 
@@ -52,7 +61,10 @@ pub struct Notifications {
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { discord_webhook_url: None, events: NotifyEvent::all() }
+        Self {
+            discord_webhook_url: None,
+            events: NotifyEvent::all(),
+        }
     }
 }
 
@@ -131,22 +143,12 @@ pub struct Experiments {
     pub analytics_file: Option<PathBuf>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            auth: AuthConfig::default(),
-            farm: FarmConfig::default(),
-            streamers: Vec::new(),
-            experiments: Experiments::default(),
-            notifications: Notifications::default(),
-            drops: DropsConfig::default(),
-        }
-    }
-}
-
 impl Default for AuthConfig {
     fn default() -> Self {
-        Self { token: None, token_file: PathBuf::from(".kick_token") }
+        Self {
+            token: None,
+            token_file: PathBuf::from(".kick_token"),
+        }
     }
 }
 
@@ -185,14 +187,18 @@ impl Config {
                 path.display()
             );
         }
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Config =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         cfg.streamers = cfg
             .streamers
             .iter()
-            .map(|s| s.trim().trim_start_matches("https://kick.com/").to_lowercase())
+            .map(|s| {
+                s.trim()
+                    .trim_start_matches("https://kick.com/")
+                    .to_lowercase()
+            })
             .filter(|s| !s.is_empty())
             .collect();
         cfg.farm.max_concurrent = cfg.farm.max_concurrent.max(1);
@@ -206,25 +212,25 @@ impl Config {
         if cfg.auth.token_file.is_relative() {
             cfg.auth.token_file = base.join(&cfg.auth.token_file);
         }
-        if let Some(a) = &cfg.experiments.analytics_file {
-            if a.is_relative() {
-                cfg.experiments.analytics_file = Some(base.join(a));
-            }
+        if let Some(a) = &cfg.experiments.analytics_file
+            && a.is_relative()
+        {
+            cfg.experiments.analytics_file = Some(base.join(a));
         }
         Ok(cfg)
     }
 
     /// Token resolution order: KICK_TOKEN env var, `auth.token`, `auth.token_file`.
     pub fn resolve_token(&self) -> Result<String> {
-        if let Ok(t) = std::env::var("KICK_TOKEN") {
-            if !t.trim().is_empty() {
-                return Ok(normalize_token(&t));
-            }
+        if let Ok(t) = std::env::var("KICK_TOKEN")
+            && !t.trim().is_empty()
+        {
+            return Ok(normalize_token(&t));
         }
-        if let Some(t) = &self.auth.token {
-            if !t.trim().is_empty() {
-                return Ok(normalize_token(t));
-            }
+        if let Some(t) = &self.auth.token
+            && !t.trim().is_empty()
+        {
+            return Ok(normalize_token(t));
         }
         let t = std::fs::read_to_string(&self.auth.token_file).with_context(|| {
             format!(

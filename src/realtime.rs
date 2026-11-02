@@ -24,13 +24,26 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone)]
 pub enum Event {
     Connected,
-    PointsUpdated { channel_id: u64, points: i64, balance: i64, reason: String },
-    LevelUp { level: u32 },
+    PointsUpdated {
+        channel_id: u64,
+        points: i64,
+        balance: i64,
+        reason: String,
+    },
+    LevelUp {
+        level: u32,
+    },
     WatchGoalReached,
-    StreamerLive { channel_id: u64 },
-    StreamerOffline { channel_id: u64 },
+    StreamerLive {
+        channel_id: u64,
+    },
+    StreamerOffline {
+        channel_id: u64,
+    },
     /// Title or category of a watched livestream changed.
-    LivestreamUpdated { livestream_id: u64 },
+    LivestreamUpdated {
+        livestream_id: u64,
+    },
     Unauthorized,
 }
 
@@ -82,7 +95,8 @@ impl Realtime {
     }
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct Task {
     client: KickClient,
@@ -165,13 +179,20 @@ impl Task {
         let h = req.headers_mut();
         h.insert("Origin", HeaderValue::from_static("https://kick.com"));
         h.insert("User-Agent", HeaderValue::from_static(USER_AGENT));
-        let (mut ws, _) =
-            tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(req)).await??;
+        let (mut ws, _) = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio_tungstenite::connect_async(req),
+        )
+        .await??;
 
         self.next_id = 1;
         self.pending.clear();
-        ws.send(Message::Text(json!({"connect":{"token":token,"name":"js"},"id":1}).to_string().into()))
-            .await?;
+        ws.send(Message::Text(
+            json!({"connect":{"token":token,"name":"js"},"id":1})
+                .to_string()
+                .into(),
+        ))
+        .await?;
         // Wait for the connect reply to learn the token TTL.
         loop {
             let m = tokio::time::timeout(Duration::from_secs(15), ws.next())
@@ -191,7 +212,12 @@ impl Task {
         }
     }
 
-    async fn subscribe(&mut self, ws: &mut Ws, channel: String, private: bool) -> anyhow::Result<()> {
+    async fn subscribe(
+        &mut self,
+        ws: &mut Ws,
+        channel: String,
+        private: bool,
+    ) -> anyhow::Result<()> {
         let id = self.id();
         let msg = if private {
             let token = self.client.realtime_channel_token(&channel).await?;
@@ -212,9 +238,15 @@ impl Task {
         cancel: &CancellationToken,
     ) -> End {
         // Reconnect (fresh tokens) a bit before the connection token expires.
-        let refresh_at = Instant::now() + ttl.saturating_sub(Duration::from_secs(120)).max(Duration::from_secs(60));
+        let refresh_at = Instant::now()
+            + ttl
+                .saturating_sub(Duration::from_secs(120))
+                .max(Duration::from_secs(60));
         let uid = self.user_id;
-        for (ch, private) in [(format!("private-channelpoints-{uid}"), true), (format!("private-{uid}"), true)] {
+        for (ch, private) in [
+            (format!("private-channelpoints-{uid}"), true),
+            (format!("private-{uid}"), true),
+        ] {
             if let Err(e) = self.subscribe(&mut ws, ch.clone(), private).await {
                 tracing::warn!("realtime: subscribing to {ch} failed: {e:#}");
             }
@@ -225,13 +257,19 @@ impl Task {
         }
         let ids: Vec<u64> = self.channels.iter().copied().collect();
         for id in ids {
-            if let Err(e) = self.subscribe(&mut ws, format!("channel.{id}"), false).await {
+            if let Err(e) = self
+                .subscribe(&mut ws, format!("channel.{id}"), false)
+                .await
+            {
                 return End::Reconnect(e.to_string());
             }
         }
         let ls: Vec<u64> = self.livestreams.iter().copied().collect();
         for id in ls {
-            if let Err(e) = self.subscribe(&mut ws, format!("private-livestream.{id}"), true).await {
+            if let Err(e) = self
+                .subscribe(&mut ws, format!("private-livestream.{id}"), true)
+                .await
+            {
                 tracing::debug!("realtime: livestream {id} subscription failed: {e:#}");
             }
         }
@@ -253,18 +291,16 @@ impl Task {
                 c = rx.recv() => match c {
                     None => return End::Cancelled,
                     Some(Cmd::WatchChannel(id)) => {
-                        if self.channels.insert(id) {
-                            if let Err(e) = self.subscribe(&mut ws, format!("channel.{id}"), false).await {
+                        if self.channels.insert(id)
+                            && let Err(e) = self.subscribe(&mut ws, format!("channel.{id}"), false).await {
                                 return End::Reconnect(e.to_string());
                             }
-                        }
                     }
                     Some(Cmd::WatchLivestream(id)) => {
-                        if self.livestreams.insert(id) {
-                            if let Err(e) = self.subscribe(&mut ws, format!("private-livestream.{id}"), true).await {
+                        if self.livestreams.insert(id)
+                            && let Err(e) = self.subscribe(&mut ws, format!("private-livestream.{id}"), true).await {
                                 tracing::debug!("realtime: livestream {id} subscription failed: {e:#}");
                             }
-                        }
                     }
                     Some(Cmd::UnwatchLivestream(id)) => {
                         if self.livestreams.remove(&id) {
@@ -301,35 +337,60 @@ impl Task {
     }
 
     fn on_reply(&mut self, line: &str) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
         if let Some(id) = v.get("id").and_then(Value::as_u64) {
             let ch = self.pending.remove(&id);
             if let Some(err) = v.get("error") {
-                tracing::warn!("realtime: request for {} failed: {err}", ch.unwrap_or_default());
+                tracing::warn!(
+                    "realtime: request for {} failed: {err}",
+                    ch.unwrap_or_default()
+                );
             }
             return;
         }
         let Some(push) = v.get("push") else { return };
-        let channel = push.get("channel").and_then(Value::as_str).unwrap_or_default();
-        let Some(data) = push.pointer("/pub/data") else { return };
-        let event = data.get("event").and_then(Value::as_str).unwrap_or_default();
+        let channel = push
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(data) = push.pointer("/pub/data") else {
+            return;
+        };
+        let event = data
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         // Payload is usually a JSON-encoded string, sometimes an object.
         let payload: Value = match data.get("data") {
             Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
             Some(o) => o.clone(),
             None => Value::Null,
         };
-        let num = |k: &str| payload.get(k).and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()));
+        let num = |k: &str| {
+            payload
+                .get(k)
+                .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
+        };
         let ev = match event {
             "PointsUpdated" => Some(Event::PointsUpdated {
                 channel_id: num("channel_id").unwrap_or(0) as u64,
                 points: num("points").unwrap_or(0),
                 balance: num("balance").unwrap_or(0),
-                reason: payload.get("reason").and_then(Value::as_str).unwrap_or_default().to_string(),
+                reason: payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             }),
-            "GamificationLevelUp" => Some(Event::LevelUp { level: num("level").unwrap_or(0) as u32 }),
+            "GamificationLevelUp" => Some(Event::LevelUp {
+                level: num("level").unwrap_or(0) as u32,
+            }),
             "GamificationWatchTimeGoalReached" => Some(Event::WatchGoalReached),
-            e if e.ends_with("StreamerIsLive") => channel_id_of(channel).map(|id| Event::StreamerLive { channel_id: id }),
+            e if e.ends_with("StreamerIsLive") => {
+                channel_id_of(channel).map(|id| Event::StreamerLive { channel_id: id })
+            }
             e if e.ends_with("LivestreamUpdated") => channel
                 .strip_prefix("private-livestream.")
                 .and_then(|id| id.parse().ok())

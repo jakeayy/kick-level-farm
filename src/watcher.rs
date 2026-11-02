@@ -1,13 +1,16 @@
 //! Emulates the kick.com web player's presence on `wss://websockets.kick.com/viewer/v1/connect`.
 //!
 //! Protocol observed from the web client (bundle `WebSocketProvider` + watch-tracking hook):
-//!   * GET  /viewer/v1/token (Bearer + X-CLIENT-TOKEN)       -> one-shot connect token
-//!   * WS   connect?token=...
-//!   * send {"type":"user_event","data":{"message":{"name":"tracking.user.watch.livestream",
-//!           "channel_id":..,"livestream_id":..,"vod_id":".."}}}   on start, then every `interval` s
-//!   * send {"type":"channel_handshake","data":{"message":{"channelId":"<id>"}}}  every 15 s
-//!   * send {"type":"ping"}                                                     every 30 s
-//!   * send {"type":"channel_disconnect",...}                                   when leaving
+//!
+//! ```text
+//! GET  /viewer/v1/token (Bearer + X-CLIENT-TOKEN)       -> one-shot connect token
+//! WS   connect?token=...
+//! send {"type":"user_event","data":{"message":{"name":"tracking.user.watch.livestream",
+//!       "channel_id":..,"livestream_id":..,"vod_id":".."}}}   on start, then every `interval` s
+//! send {"type":"channel_handshake","data":{"message":{"channelId":"<id>"}}}  every 15 s
+//! send {"type":"ping"}                                                     every 30 s
+//! send {"type":"channel_disconnect",...}                                   when leaving
+//! ```
 
 use crate::api::{KickClient, USER_AGENT, VIEWER_WS_URL, is_unauthorized};
 use futures_util::{SinkExt, StreamExt};
@@ -44,7 +47,12 @@ pub struct WatchStats {
 
 impl WatchStats {
     pub fn events_for(&self, channel_id: u64) -> u64 {
-        self.events.lock().unwrap().get(&channel_id).copied().unwrap_or(0)
+        self.events
+            .lock()
+            .unwrap()
+            .get(&channel_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -111,7 +119,8 @@ struct Task {
     seen_types: HashSet<String>,
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn jitter(d: Duration, max_ms: u64) -> Duration {
     d + Duration::from_millis(fastrand::u64(0..=max_ms))
@@ -131,11 +140,15 @@ fn watch_event(t: &WatchTarget) -> Message {
 }
 
 fn handshake_msg(channel_id: u64) -> Message {
-    msg(json!({"type":"channel_handshake","data":{"message":{"channelId": channel_id.to_string()}}}))
+    msg(
+        json!({"type":"channel_handshake","data":{"message":{"channelId": channel_id.to_string()}}}),
+    )
 }
 
 fn disconnect_msg(channel_id: u64) -> Message {
-    msg(json!({"type":"channel_disconnect","data":{"message":{"channelId": channel_id.to_string()}}}))
+    msg(
+        json!({"type":"channel_disconnect","data":{"message":{"channelId": channel_id.to_string()}}}),
+    )
 }
 
 impl Task {
@@ -166,7 +179,10 @@ impl Task {
                     if is_unauthorized(&e) {
                         self.stats.unauthorized.store(true, Ordering::Relaxed);
                     }
-                    tracing::warn!("[{}] viewer socket connect failed: {e:#}; retry in {backoff:?}", self.label);
+                    tracing::warn!(
+                        "[{}] viewer socket connect failed: {e:#}; retry in {backoff:?}",
+                        self.label
+                    );
                     let deadline = Instant::now() + backoff;
                     backoff = (backoff.mul_f32(1.6)).min(Duration::from_secs(60));
                     loop {
@@ -186,7 +202,10 @@ impl Task {
             match self.session(ws, &mut rx, &cancel).await {
                 SessionEnd::Cancelled | SessionEnd::ChannelClosed => return,
                 SessionEnd::Dropped(reason) => {
-                    tracing::info!("[{}] viewer socket dropped ({reason}); reconnecting", self.label);
+                    tracing::info!(
+                        "[{}] viewer socket dropped ({reason}); reconnecting",
+                        self.label
+                    );
                     tokio::time::sleep(jitter(Duration::from_millis(500), 1500)).await;
                 }
             }
@@ -196,7 +215,13 @@ impl Task {
     fn apply_offline(&mut self, c: Cmd) {
         match c {
             Cmd::Add(t) => {
-                self.targets.insert(t.channel_id, Slot { next_event: Instant::now(), target: t });
+                self.targets.insert(
+                    t.channel_id,
+                    Slot {
+                        next_event: Instant::now(),
+                        target: t,
+                    },
+                );
             }
             Cmd::Remove(id) => {
                 self.targets.remove(&id);
@@ -210,7 +235,10 @@ impl Task {
         let h = req.headers_mut();
         h.insert("Origin", HeaderValue::from_static("https://kick.com"));
         h.insert("User-Agent", HeaderValue::from_static(USER_AGENT));
-        h.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
+        h.insert(
+            "Accept-Language",
+            HeaderValue::from_static("en-US,en;q=0.9"),
+        );
         let (ws, _resp) = tokio::time::timeout(
             Duration::from_secs(15),
             tokio_tungstenite::connect_async(req),
@@ -221,7 +249,9 @@ impl Task {
     }
 
     async fn send_event(&mut self, ws: &mut Ws, id: u64) -> anyhow::Result<()> {
-        let Some(slot) = self.targets.get_mut(&id) else { return Ok(()) };
+        let Some(slot) = self.targets.get_mut(&id) else {
+            return Ok(());
+        };
         ws.send(watch_event(&slot.target)).await?;
         slot.next_event = Instant::now() + jitter(self.interval, 1500);
         let n = {
@@ -249,15 +279,13 @@ impl Task {
         let ids: Vec<u64> = self.targets.keys().copied().collect();
         for id in ids {
             let due = self.targets[&id].next_event <= now;
-            if due {
-                if let Err(e) = self.send_event(&mut ws, id).await {
-                    return SessionEnd::Dropped(e.to_string());
-                }
+            if due && let Err(e) = self.send_event(&mut ws, id).await {
+                return SessionEnd::Dropped(e.to_string());
             }
-            if self.handshake {
-                if let Err(e) = ws.send(handshake_msg(id)).await {
-                    return SessionEnd::Dropped(e.to_string());
-                }
+            if self.handshake
+                && let Err(e) = ws.send(handshake_msg(id)).await
+            {
+                return SessionEnd::Dropped(e.to_string());
             }
         }
 
@@ -346,9 +374,17 @@ impl Task {
             return;
         }
         if self.seen_types.insert(kind.clone()) {
-            tracing::info!("[{}] new viewer-socket message type `{kind}`: {}", self.label, t.chars().take(300).collect::<String>());
+            tracing::info!(
+                "[{}] new viewer-socket message type `{kind}`: {}",
+                self.label,
+                t.chars().take(300).collect::<String>()
+            );
         } else {
-            tracing::debug!("[{}] <- {}", self.label, t.chars().take(300).collect::<String>());
+            tracing::debug!(
+                "[{}] <- {}",
+                self.label,
+                t.chars().take(300).collect::<String>()
+            );
         }
     }
 }

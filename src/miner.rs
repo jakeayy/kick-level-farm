@@ -1,7 +1,7 @@
 use crate::api::{self, KickClient, Level, LiveInfo, User};
 use crate::config::{Config, Priority};
 use crate::drops::{self, DropPlan};
-use crate::notify::{NotifyEvent, Notifier};
+use crate::notify::{Notifier, NotifyEvent};
 use crate::realtime::{self, Realtime};
 use crate::watcher::{Connection, WatchStats, WatchTarget};
 use anyhow::{Result, bail};
@@ -42,7 +42,12 @@ struct Streamer {
 
 impl Streamer {
     fn new(slug: &str, index: usize, fallback: bool) -> Self {
-        Self { slug: slug.to_string(), index, fallback, ..Default::default() }
+        Self {
+            slug: slug.to_string(),
+            index,
+            fallback,
+            ..Default::default()
+        }
     }
 
     fn target(&self) -> Option<WatchTarget> {
@@ -125,10 +130,16 @@ impl Miner {
             }
             None => Duration::from_secs(client.watch_event_interval().await.unwrap_or(120)),
         };
-        let notifier = Notifier::new(cfg.notifications.webhook(), &cfg.notifications.events, "kick-level-farm");
+        let notifier = Notifier::new(
+            cfg.notifications.webhook(),
+            &cfg.notifications.events,
+            "kick-level-farm",
+        );
         let mut streamers = HashMap::new();
         for (i, s) in cfg.streamers.iter().enumerate() {
-            streamers.entry(s.clone()).or_insert_with(|| Streamer::new(s, i, false));
+            streamers
+                .entry(s.clone())
+                .or_insert_with(|| Streamer::new(s, i, false));
         }
         Ok(Self {
             cfg,
@@ -186,7 +197,8 @@ impl Miner {
             rt_rx = Some(rx);
         }
 
-        let mut refresh = tokio::time::interval(Duration::from_secs(self.cfg.farm.refresh_live_secs));
+        let mut refresh =
+            tokio::time::interval(Duration::from_secs(self.cfg.farm.refresh_live_secs));
         let mut poll = tokio::time::interval(Duration::from_secs(self.cfg.farm.poll_progress_secs));
         poll.reset_after(Duration::from_secs(5)); // let refresh run first
         // Set by realtime go-live/offline events: refresh shortly after.
@@ -275,7 +287,11 @@ impl Miner {
         let summary = self.summary();
         println!("{summary}");
         match &result {
-            Ok(()) => self.notifier.send(NotifyEvent::Stopped, "Farming stopped", format!("```\n{summary}\n```")),
+            Ok(()) => self.notifier.send(
+                NotifyEvent::Stopped,
+                "Farming stopped",
+                format!("```\n{summary}\n```"),
+            ),
             Err(e) => self.notifier.send(
                 NotifyEvent::Error,
                 "Farming stopped with an error",
@@ -292,7 +308,12 @@ impl Miner {
         match ev {
             E::Connected => Ok(false),
             E::Unauthorized => Err(api::ApiError::Unauthorized.into()),
-            E::PointsUpdated { channel_id, points, balance, reason } => {
+            E::PointsUpdated {
+                channel_id,
+                points,
+                balance,
+                reason,
+            } => {
                 // Only channels we farm points on (configured/followed), never the fallback.
                 if let Some(s) = self
                     .streamers
@@ -308,7 +329,10 @@ impl Miner {
                     if reason.eq_ignore_ascii_case("redeemed") {
                         tracing::info!("{}: {points:+} points redeemed (now {balance})", s.slug);
                     } else {
-                        tracing::info!("{}: {points:+} channel points (now {balance}, {session:+} this session) [live]", s.slug);
+                        tracing::info!(
+                            "{}: {points:+} channel points (now {balance}, {session:+} this session) [live]",
+                            s.slug
+                        );
                     }
                 }
                 Ok(false)
@@ -325,17 +349,26 @@ impl Miner {
                 Ok(false)
             }
             E::LivestreamUpdated { livestream_id } => {
-                let slug = self.active.iter().find(|(_, a)| a.target.livestream_id == livestream_id).map(|(s, _)| s.clone());
+                let slug = self
+                    .active
+                    .iter()
+                    .find(|(_, a)| a.target.livestream_id == livestream_id)
+                    .map(|(s, _)| s.clone());
                 match slug {
                     Some(slug) => {
-                        tracing::debug!("realtime: {slug} updated its stream (title/category) — re-checking");
+                        tracing::debug!(
+                            "realtime: {slug} updated its stream (title/category) — re-checking"
+                        );
                         Ok(true)
                     }
                     None => Ok(false),
                 }
             }
             E::StreamerLive { channel_id } | E::StreamerOffline { channel_id } => {
-                let known = self.streamers.values().any(|s| s.channel_id == Some(channel_id) && !s.fallback);
+                let known = self
+                    .streamers
+                    .values()
+                    .any(|s| s.channel_id == Some(channel_id) && !s.fallback);
                 if known {
                     tracing::debug!("realtime: live status changed for channel {channel_id}");
                 }
@@ -355,9 +388,18 @@ impl Miner {
         }
         tracing::info!("★ LEVEL UP! now level {level}");
         let detail = lvl
-            .map(|l| format!("Total XP: {}\nNext level in {} XP", l.total_xp, l.xp_to_next_level))
+            .map(|l| {
+                format!(
+                    "Total XP: {}\nNext level in {} XP",
+                    l.total_xp, l.xp_to_next_level
+                )
+            })
             .unwrap_or_default();
-        self.notifier.send(NotifyEvent::LevelUp, format!("Level up! {} is now level {level}", self.user.username), detail);
+        self.notifier.send(
+            NotifyEvent::LevelUp,
+            format!("Level up! {} is now level {level}", self.user.username),
+            detail,
+        );
     }
 
     fn spawn_conn(&self, label: String) -> Connection {
@@ -393,10 +435,15 @@ impl Miner {
                         }
                     }
                     // Only hit /info for followed channels that are actually live.
-                    let live: HashSet<String> =
-                        list.iter().filter(|f| f.is_live).map(|f| f.channel_slug.to_lowercase()).collect();
-                    self.refresh_slugs(|s| !s.fallback && (s.index < base || live.contains(&s.slug)))
-                        .await?;
+                    let live: HashSet<String> = list
+                        .iter()
+                        .filter(|f| f.is_live)
+                        .map(|f| f.channel_slug.to_lowercase())
+                        .collect();
+                    self.refresh_slugs(|s| {
+                        !s.fallback && (s.index < base || live.contains(&s.slug))
+                    })
+                    .await?;
                 }
                 Err(e) if api::is_unauthorized(&e) => return Err(e),
                 Err(e) => {
@@ -414,7 +461,8 @@ impl Miner {
             .filter(|k| self.streamers.get(*k).is_some_and(|s| s.fallback))
             .cloned()
             .collect();
-        self.refresh_slugs(|s| watched_fallbacks.contains(&s.slug)).await?;
+        self.refresh_slugs(|s| watched_fallbacks.contains(&s.slug))
+            .await?;
 
         self.reconcile().await
     }
@@ -459,7 +507,11 @@ impl Miner {
             s.live = info.livestream.filter(|l| l.is_live);
             let is_live = s.live.is_some();
             if is_live != was_live && !s.fallback {
-                tracing::info!("{} is now {}", slug, if is_live { "LIVE" } else { "offline" });
+                tracing::info!(
+                    "{} is now {}",
+                    slug,
+                    if is_live { "LIVE" } else { "offline" }
+                );
                 if is_live && self.initial_refresh_done {
                     let viewers = s.viewers();
                     self.notifier.send(
@@ -469,26 +521,24 @@ impl Miner {
                     );
                 }
             }
-            if !s.fallback {
-                if let Some(rt) = &self.realtime {
-                    rt.watch_channel(info.id);
-                }
+            if !s.fallback
+                && let Some(rt) = &self.realtime
+            {
+                rt.watch_channel(info.id);
             }
             need_settings = is_live && s.points_enabled.is_none();
         }
-        if need_settings {
-            if let Ok(ps) = self.client.points_settings(slug).await {
-                let s = self.streamers.get_mut(slug).unwrap();
-                s.points_enabled = Some(ps.channel_points_enabled);
-                if ps.web_watch_event_interval_seconds != self.interval.as_secs()
-                    && self.cfg.experiments.watch_event_interval_secs.is_none()
-                {
-                    tracing::debug!(
-                        "{slug}: channel watch interval {}s differs from global {}s",
-                        ps.web_watch_event_interval_seconds,
-                        self.interval.as_secs()
-                    );
-                }
+        if need_settings && let Ok(ps) = self.client.points_settings(slug).await {
+            let s = self.streamers.get_mut(slug).unwrap();
+            s.points_enabled = Some(ps.channel_points_enabled);
+            if ps.web_watch_event_interval_seconds != self.interval.as_secs()
+                && self.cfg.experiments.watch_event_interval_secs.is_none()
+            {
+                tracing::debug!(
+                    "{slug}: channel watch interval {}s differs from global {}s",
+                    ps.web_watch_event_interval_seconds,
+                    self.interval.as_secs()
+                );
             }
         }
         Ok(())
@@ -539,7 +589,11 @@ impl Miner {
             .collect();
         cands.sort_by(|a, b| self.cmp_priority(a, b));
         // Drop progress is split across concurrent streams, so keep the drop stream alone.
-        let room = if self.cfg.drops.exclusive && !desired.is_empty() { 0 } else { max.saturating_sub(desired.len()) };
+        let room = if self.cfg.drops.exclusive && !desired.is_empty() {
+            0
+        } else {
+            max.saturating_sub(desired.len())
+        };
         let more: Vec<String> = cands.iter().take(room).map(|s| s.slug.clone()).collect();
         desired.extend(more);
 
@@ -576,13 +630,19 @@ impl Miner {
             }
         }
         if self.active.is_empty() {
-            tracing::info!("nothing live to watch right now; checking again in {}s", self.cfg.farm.refresh_live_secs);
+            tracing::info!(
+                "nothing live to watch right now; checking again in {}s",
+                self.cfg.farm.refresh_live_secs
+            );
         }
         Ok(())
     }
 
     async fn refresh_drop_data(&mut self) -> Result<()> {
-        if self.drop_campaigns_at.is_none_or(|t| t.elapsed() > DROP_CAMPAIGNS_CACHE) {
+        if self
+            .drop_campaigns_at
+            .is_none_or(|t| t.elapsed() > DROP_CAMPAIGNS_CACHE)
+        {
             match self.client.drop_campaigns().await {
                 Ok(c) => {
                     self.drop_campaigns = c;
@@ -592,7 +652,10 @@ impl Miner {
                 Err(e) => tracing::warn!("could not fetch drop campaigns: {e:#}"),
             }
         }
-        if self.drop_progress_at.is_none_or(|t| t.elapsed() > DROP_PROGRESS_CACHE) {
+        if self
+            .drop_progress_at
+            .is_none_or(|t| t.elapsed() > DROP_PROGRESS_CACHE)
+        {
             match self.client.drops_progress().await {
                 Ok(p) => {
                     self.drop_progress = p;
@@ -608,7 +671,12 @@ impl Miner {
     async fn pick_drop_streams(&mut self, slots: usize) -> Result<Vec<String>> {
         self.refresh_drop_data().await?;
         let mut skipped = HashMap::new();
-        let plans = drops::plan(&self.drop_campaigns, &self.drop_progress, &self.cfg.drops, &mut skipped);
+        let plans = drops::plan(
+            &self.drop_campaigns,
+            &self.drop_progress,
+            &self.cfg.drops,
+            &mut skipped,
+        );
         for (id, msg) in skipped {
             if self.drop_skip_logged.insert(id) {
                 tracing::info!("{msg}");
@@ -616,7 +684,10 @@ impl Miner {
         }
         // Streams we were farming drops on that left the campaign's category.
         for (cid, slug) in &self.drop_current {
-            let (Some(plan), Some(s)) = (plans.iter().find(|p| &p.campaign_id == cid), self.streamers.get(slug)) else {
+            let (Some(plan), Some(s)) = (
+                plans.iter().find(|p| &p.campaign_id == cid),
+                self.streamers.get(slug),
+            ) else {
                 continue;
             };
             if let Some(live) = s.live.as_ref().filter(|l| !l.in_category(plan.category_id)) {
@@ -637,11 +708,15 @@ impl Miner {
             match self.find_drop_stream(plan, &out).await? {
                 Some(slug) => {
                     if let Some(s) = self.streamers.get_mut(&slug) {
-                        s.drop_label = Some(format!("{} `{}`", plan.kind.label(), plan.reward_name));
+                        s.drop_label =
+                            Some(format!("{} `{}`", plan.kind.label(), plan.reward_name));
                         s.drop_farmed = true;
                     }
                     current.push((plan.campaign_id.clone(), slug.clone()));
-                    if !self.drop_current.contains(&(plan.campaign_id.clone(), slug.clone())) {
+                    if !self
+                        .drop_current
+                        .contains(&(plan.campaign_id.clone(), slug.clone()))
+                    {
                         tracing::info!(
                             "drops: farming {} `{}` from `{}` ({}) on {slug} — {} min to go",
                             plan.kind.label(),
@@ -653,7 +728,11 @@ impl Miner {
                     }
                     out.push(slug);
                 }
-                None => tracing::debug!("drops: no live stream for `{}` ({})", plan.campaign_name, plan.category_name),
+                None => tracing::debug!(
+                    "drops: no live stream for `{}` ({})",
+                    plan.campaign_name,
+                    plan.category_name
+                ),
             }
         }
         if current.is_empty() && !self.drop_current.is_empty() {
@@ -664,10 +743,10 @@ impl Miner {
     }
 
     async fn category_live(&mut self, category_id: u64) -> Result<Vec<String>> {
-        if let Some((t, v)) = self.category_live.get(&category_id) {
-            if t.elapsed() < CATEGORY_CACHE {
-                return Ok(v.clone());
-            }
+        if let Some((t, v)) = self.category_live.get(&category_id)
+            && t.elapsed() < CATEGORY_CACHE
+        {
+            return Ok(v.clone());
         }
         let v = match self.client.live_in_category(category_id, 100).await {
             Ok(v) => v,
@@ -677,38 +756,65 @@ impl Miner {
                 Vec::new()
             }
         };
-        self.category_live.insert(category_id, (Instant::now(), v.clone()));
+        self.category_live
+            .insert(category_id, (Instant::now(), v.clone()));
         Ok(v)
     }
 
-    async fn find_drop_stream(&mut self, plan: &DropPlan, exclude: &[String]) -> Result<Option<String>> {
+    async fn find_drop_stream(
+        &mut self,
+        plan: &DropPlan,
+        exclude: &[String],
+    ) -> Result<Option<String>> {
         let ok = |s: &Streamer| {
             !exclude.contains(&s.slug)
                 && s.target().is_some()
-                && s.live.as_ref().is_some_and(|l| l.in_category(plan.category_id))
+                && s.live
+                    .as_ref()
+                    .is_some_and(|l| l.in_category(plan.category_id))
                 && plan.accepts(&s.slug)
         };
         // 1) A configured/followed channel that qualifies also keeps earning points.
-        let mut regs: Vec<&Streamer> = self.streamers.values().filter(|s| !s.fallback && ok(s)).collect();
+        let mut regs: Vec<&Streamer> = self
+            .streamers
+            .values()
+            .filter(|s| !s.fallback && ok(s))
+            .collect();
         regs.sort_by(|a, b| self.cmp_priority(a, b));
         if let Some(s) = regs.first() {
             return Ok(Some(s.slug.clone()));
         }
         // 2) Stay on the stream we're already farming this campaign on.
-        if let Some(slug) = self.active.keys().find(|k| self.streamers.get(*k).is_some_and(|s| ok(s))) {
+        if let Some(slug) = self
+            .active
+            .keys()
+            .find(|k| self.streamers.get(*k).is_some_and(ok))
+        {
             return Ok(Some(slug.clone()));
         }
         // 3) Any live participating stream in the campaign's category.
         let live = self.category_live(plan.category_id).await?;
-        let mut pool: Vec<String> = live.into_iter().filter(|s| plan.accepts(s) && !exclude.contains(s)).take(6).collect();
+        let mut pool: Vec<String> = live
+            .into_iter()
+            .filter(|s| plan.accepts(s) && !exclude.contains(s))
+            .take(6)
+            .collect();
         if pool.is_empty() && !plan.channels.is_empty() {
             // Participating channels may be beyond the first page of the category.
-            pool = plan.channels.iter().filter(|s| !exclude.contains(s)).take(8).cloned().collect();
+            pool = plan
+                .channels
+                .iter()
+                .filter(|s| !exclude.contains(s))
+                .take(8)
+                .cloned()
+                .collect();
         }
         for slug in pool {
-            self.streamers.entry(slug.clone()).or_insert_with(|| Streamer::new(&slug, usize::MAX, true));
+            self.streamers
+                .entry(slug.clone())
+                .or_insert_with(|| Streamer::new(&slug, usize::MAX, true));
             self.refresh_one(&slug).await?;
-            if self.streamers.get(&slug).is_some_and(|s| ok(s)) {
+            if self.streamers.get(&slug).is_some_and(ok) {
                 return Ok(Some(slug));
             }
             tokio::time::sleep(POLITE_DELAY).await;
@@ -721,7 +827,11 @@ impl Miner {
         let mut current: Vec<String> = self
             .active
             .keys()
-            .filter(|k| self.streamers.get(*k).is_some_and(|s| s.fallback && !s.drop_farmed && s.target().is_some()))
+            .filter(|k| {
+                self.streamers
+                    .get(*k)
+                    .is_some_and(|s| s.fallback && !s.drop_farmed && s.target().is_some())
+            })
             .cloned()
             .collect();
         current.sort();
@@ -737,7 +847,11 @@ impl Miner {
             return Ok(());
         }
         if self.popular_at.is_none_or(|t| t.elapsed() > POPULAR_CACHE) {
-            match self.client.popular_streams(&self.cfg.farm.fallback_language, 24).await {
+            match self
+                .client
+                .popular_streams(&self.cfg.farm.fallback_language, 24)
+                .await
+            {
                 Ok(p) => {
                     self.popular = p;
                     self.popular_at = Some(Instant::now());
@@ -804,11 +918,20 @@ impl Miner {
         if let Some(rt) = &self.realtime {
             rt.watch_livestream(t.livestream_id);
         }
-        self.active.insert(t.slug.clone(), Active { target: t, since: Instant::now(), conn });
+        self.active.insert(
+            t.slug.clone(),
+            Active {
+                target: t,
+                since: Instant::now(),
+                conn,
+            },
+        );
     }
 
     async fn stop(&mut self, slug: &str, why: &str) {
-        let Some(a) = self.active.remove(slug) else { return };
+        let Some(a) = self.active.remove(slug) else {
+            return;
+        };
         if let Some(rt) = &self.realtime {
             rt.unwatch_livestream(a.target.livestream_id);
         }
@@ -832,7 +955,10 @@ impl Miner {
     async fn poll_progress(&mut self) -> Result<()> {
         // Account level / XP
         let level = self.client.level().await?;
-        let start = self.start_level.get_or_insert_with(|| level.clone()).clone();
+        let start = self
+            .start_level
+            .get_or_insert_with(|| level.clone())
+            .clone();
         let gained = level.total_xp.saturating_sub(start.total_xp);
         let since_last = self
             .last_level
@@ -849,7 +975,11 @@ impl Miner {
             level.total_xp,
             since_last,
             gained,
-            if hours > 0.05 { format!(", ~{:.0} XP/h", gained as f64 / hours) } else { String::new() }
+            if hours > 0.05 {
+                format!(", ~{:.0} XP/h", gained as f64 / hours)
+            } else {
+                String::new()
+            }
         );
         self.last_level = Some(level.clone());
 
@@ -858,7 +988,11 @@ impl Miner {
             .streamers
             .values()
             // Channel points are only farmed/tracked on configured or followed channels.
-            .filter(|s| !s.fallback && !s.missing && (self.active.contains_key(&s.slug) || s.points.is_none()))
+            .filter(|s| {
+                !s.fallback
+                    && !s.missing
+                    && (self.active.contains_key(&s.slug) || s.points.is_none())
+            })
             .map(|s| s.slug.clone())
             .collect();
         for slug in slugs {
@@ -868,14 +1002,14 @@ impl Miner {
                     let prev = s.points;
                     s.start_points.get_or_insert(p);
                     s.points = Some(p);
-                    if let Some(prev) = prev {
-                        if p != prev {
-                            tracing::info!(
-                                "{slug}: {:+} channel points (now {p}, +{} this session)",
-                                p - prev,
-                                p - s.start_points.unwrap_or(p)
-                            );
-                        }
+                    if let Some(prev) = prev
+                        && p != prev
+                    {
+                        tracing::info!(
+                            "{slug}: {:+} channel points (now {p}, +{} this session)",
+                            p - prev,
+                            p - s.start_points.unwrap_or(p)
+                        );
                     }
                 }
                 Err(e) if api::is_unauthorized(&e) => return Err(e),
@@ -909,17 +1043,31 @@ impl Miner {
                 match self.client.claim_challenge(&c.id).await {
                     Ok(v) => {
                         self.claimed.insert(c.id.clone());
-                        tracing::info!("🎁 claimed `{}`: {}", c.name, v.to_string().chars().take(400).collect::<String>());
+                        tracing::info!(
+                            "🎁 claimed `{}`: {}",
+                            c.name,
+                            v.to_string().chars().take(400).collect::<String>()
+                        );
                         self.notifier.send(
                             NotifyEvent::RewardClaimed,
                             format!("Claimed {}", c.name),
-                            format!("{}/{} {} reached — open kick.com to unbox it.", c.condition.progress, c.condition.threshold, c.condition.kind.replace('_', " ")),
+                            format!(
+                                "{}/{} {} reached — open kick.com to unbox it.",
+                                c.condition.progress,
+                                c.condition.threshold,
+                                c.condition.kind.replace('_', " ")
+                            ),
                         );
                     }
                     Err(e) => tracing::warn!("claiming `{}` failed: {e:#}", c.name),
                 }
             } else if c.condition.kind == "watch_time_minutes" && c.status == "in_progress" {
-                tracing::info!("challenge `{}`: {}/{} min watched", c.name, c.condition.progress, c.condition.threshold);
+                tracing::info!(
+                    "challenge `{}`: {}/{} min watched",
+                    c.name,
+                    c.condition.progress,
+                    c.condition.threshold
+                );
             } else {
                 tracing::debug!("challenge `{}` [{key}]", c.name);
             }
@@ -948,7 +1096,11 @@ impl Miner {
                 if !r.is_claimable(c.progress_units) || self.drops_claimed.contains(&r.id) {
                     continue;
                 }
-                if self.drops_failed.get(&r.id).is_some_and(|t| t.elapsed() < DROP_RETRY) {
+                if self
+                    .drops_failed
+                    .get(&r.id)
+                    .is_some_and(|t| t.elapsed() < DROP_RETRY)
+                {
                     continue;
                 }
                 match self.client.claim_drop(&r.id, &c.id).await {
@@ -965,7 +1117,10 @@ impl Miner {
                     Err(e) => {
                         self.drops_failed.insert(r.id.clone(), Instant::now());
                         let hint = if needs_link {
-                            format!(" — this campaign needs a linked account: {}", c.connect_url.split('?').next().unwrap_or(""))
+                            format!(
+                                " — this campaign needs a linked account: {}",
+                                c.connect_url.split('?').next().unwrap_or("")
+                            )
                         } else {
                             String::new()
                         };
@@ -975,23 +1130,35 @@ impl Miner {
                 tokio::time::sleep(POLITE_DELAY).await;
             }
             // Progress towards the next unclaimed reward (logged only when it changes).
-            if let Some(next) = c.rewards.iter().find(|r| !r.claimed && !self.drops_claimed.contains(&r.id)) {
-                if self.drop_units_logged.insert(c.id.clone(), c.progress_units) != Some(c.progress_units) {
-                    tracing::info!(
-                        "drop `{}` ({category}): {}/{} min{}",
-                        next.name,
-                        c.progress_units.min(next.required_units),
-                        next.required_units,
-                        if needs_link { " (needs linked account to claim)" } else { "" }
-                    );
-                }
+            if let Some(next) = c
+                .rewards
+                .iter()
+                .find(|r| !r.claimed && !self.drops_claimed.contains(&r.id))
+                && self
+                    .drop_units_logged
+                    .insert(c.id.clone(), c.progress_units)
+                    != Some(c.progress_units)
+            {
+                tracing::info!(
+                    "drop `{}` ({category}): {}/{} min{}",
+                    next.name,
+                    c.progress_units.min(next.required_units),
+                    next.required_units,
+                    if needs_link {
+                        " (needs linked account to claim)"
+                    } else {
+                        ""
+                    }
+                );
             }
         }
         Ok(())
     }
 
     fn write_analytics(&self, level: &Level) {
-        let Some(path) = &self.cfg.experiments.analytics_file else { return };
+        let Some(path) = &self.cfg.experiments.analytics_file else {
+            return;
+        };
         let points: HashMap<&str, i64> = self
             .streamers
             .values()
@@ -1026,9 +1193,14 @@ impl Miner {
         use std::fmt::Write as _;
         let mut out = String::new();
         let elapsed = self.started.elapsed();
-        let _ = writeln!(out, "──────── session summary ({}) ────────", fmt_dur(elapsed));
+        let _ = writeln!(
+            out,
+            "──────── session summary ({}) ────────",
+            fmt_dur(elapsed)
+        );
         if let (Some(a), Some(b)) = (&self.start_level, &self.last_level) {
-            let _ = writeln!(out, 
+            let _ = writeln!(
+                out,
                 "level {} -> {}   XP {} -> {} (+{})",
                 a.level,
                 b.level,
@@ -1042,19 +1214,32 @@ impl Miner {
             .values()
             .filter(|s| s.watched > Duration::ZERO)
             .collect();
-        rows.sort_by(|a, b| b.watched.cmp(&a.watched));
+        rows.sort_by_key(|s| std::cmp::Reverse(s.watched));
         for s in rows {
             if s.fallback {
-                let tag = if s.drop_farmed { "[drops only]" } else { "[fallback: level XP only]" };
-                let _ = writeln!(out, "  {:<24} watched {:>7}  {tag}", s.slug, fmt_dur(s.watched));
+                let tag = if s.drop_farmed {
+                    "[drops only]"
+                } else {
+                    "[fallback: level XP only]"
+                };
+                let _ = writeln!(
+                    out,
+                    "  {:<24} watched {:>7}  {tag}",
+                    s.slug,
+                    fmt_dur(s.watched)
+                );
                 continue;
             }
             let gained = match (s.start_points, s.points) {
                 (Some(a), Some(b)) => format!("{:+}", b - a),
                 _ => "-".into(),
             };
-            let events = s.channel_id.map(|id| self.stats.events_for(id)).unwrap_or(0);
-            let _ = writeln!(out, 
+            let events = s
+                .channel_id
+                .map(|id| self.stats.events_for(id))
+                .unwrap_or(0);
+            let _ = writeln!(
+                out,
                 "  {:<24} watched {:>7}  events {:>4}  points {:>8} ({gained})",
                 s.slug,
                 fmt_dur(s.watched),
@@ -1092,7 +1277,9 @@ pub async fn shutdown_signal() {
 pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
     let me = match client.me().await {
         Ok(u) => u,
-        Err(e) if api::is_unauthorized(&e) => bail!("session token rejected — run `kick-level-farm login`"),
+        Err(e) if api::is_unauthorized(&e) => {
+            bail!("session token rejected — run `kick-level-farm login`")
+        }
         Err(e) => return Err(e),
     };
     println!("account: {} (id {})", me.username, me.id);
@@ -1105,7 +1292,10 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
         l.total_xp
     );
     if let Ok(s) = client.streak().await {
-        println!("streak:  {}", s.get("current_streak").cloned().unwrap_or_default());
+        println!(
+            "streak:  {}",
+            s.get("current_streak").cloned().unwrap_or_default()
+        );
     }
     if let Ok(list) = client.challenges().await {
         for c in list {
@@ -1116,11 +1306,17 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
                 c.condition.threshold,
                 c.condition.kind,
                 c.status,
-                if c.is_claimable() { "  <- claimable" } else { "" }
+                if c.is_claimable() {
+                    "  <- claimable"
+                } else {
+                    ""
+                }
             );
         }
     }
-    if let (Ok(campaigns), Ok(progress)) = (client.drop_campaigns().await, client.drops_progress().await) {
+    if let (Ok(campaigns), Ok(progress)) =
+        (client.drop_campaigns().await, client.drops_progress().await)
+    {
         let mut skipped = HashMap::new();
         let plans = drops::plan(&campaigns, &progress, &cfg.drops, &mut skipped);
         for p in &plans {
@@ -1131,7 +1327,11 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
                 p.remaining_minutes,
                 p.campaign_name,
                 p.category_name,
-                if p.channels.is_empty() { String::new() } else { format!(", {} channel(s)", p.channels.len()) }
+                if p.channels.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} channel(s)", p.channels.len())
+                }
             );
         }
         for msg in skipped.values() {
@@ -1147,19 +1347,34 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
                     c.progress_units.min(r.required_units),
                     r.required_units,
                     c.name,
-                    if r.is_claimable(c.progress_units) { "  <- claimable" } else { "" },
-                    if !c.connect_url.is_empty() && !c.user_app_connected { "  [needs linked account]" } else { "" }
+                    if r.is_claimable(c.progress_units) {
+                        "  <- claimable"
+                    } else {
+                        ""
+                    },
+                    if !c.connect_url.is_empty() && !c.user_app_connected {
+                        "  [needs linked account]"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
     }
     if !cfg.streamers.is_empty() {
-        println!("\n{:<24} {:<8} {:>10}  points", "streamer", "live", "viewers");
+        println!(
+            "\n{:<24} {:<8} {:>10}  points",
+            "streamer", "live", "viewers"
+        );
     }
     for slug in &cfg.streamers {
         let info = client.channel_info(slug).await;
         let pts = client.points(slug).await.ok();
-        let enabled = client.points_settings(slug).await.ok().map(|p| p.channel_points_enabled);
+        let enabled = client
+            .points_settings(slug)
+            .await
+            .ok()
+            .map(|p| p.channel_points_enabled);
         match info {
             Ok(i) => {
                 let live = i.livestream.as_ref().filter(|l| l.is_live);
@@ -1169,7 +1384,11 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
                     if live.is_some() { "LIVE" } else { "offline" },
                     live.map(|l| l.viewer_count.to_string()).unwrap_or_default(),
                     pts.map(|p| p.to_string()).unwrap_or("-".into()),
-                    if enabled == Some(false) { " (points disabled)" } else { "" }
+                    if enabled == Some(false) {
+                        " (points disabled)"
+                    } else {
+                        ""
+                    }
                 );
             }
             Err(e) => println!("{slug:<24} error: {e:#}"),

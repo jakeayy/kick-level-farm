@@ -29,12 +29,20 @@ pub enum NotifyEvent {
 impl NotifyEvent {
     pub fn all() -> Vec<Self> {
         use NotifyEvent::*;
-        vec![Started, Stopped, LevelUp, RewardClaimed, DropClaimed, StreamerLive, Error]
+        vec![
+            Started,
+            Stopped,
+            LevelUp,
+            RewardClaimed,
+            DropClaimed,
+            StreamerLive,
+            Error,
+        ]
     }
 
     fn color(self) -> u32 {
         match self {
-            NotifyEvent::Started => 0x53FC18,      // kick green
+            NotifyEvent::Started => 0x53FC18, // kick green
             NotifyEvent::Stopped => 0x8B8B8B,
             NotifyEvent::LevelUp => 0xF5C518,
             NotifyEvent::RewardClaimed | NotifyEvent::DropClaimed => 0xA970FF,
@@ -59,8 +67,14 @@ struct Inner {
 
 impl Notifier {
     pub fn new(url: Option<String>, events: &[NotifyEvent], username: &str) -> Self {
-        let Some(url) = url.filter(|u| u.starts_with("https://") || u.starts_with("http://")) else { return Self::default() };
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
+        let Some(url) = url.filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        else {
+            return Self::default();
+        };
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
         Self {
             inner: Some(Arc::new(Inner {
                 http,
