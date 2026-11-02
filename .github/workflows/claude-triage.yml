@@ -50,7 +50,7 @@ jobs:
       ASSOCIATION: ${{ github.event.issue.author_association || github.event.pull_request.author_association }}
     steps:
       # Trusted code only: the default branch (for pull_request_target this is the base, not the PR).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -74,7 +74,7 @@ jobs:
           ls -l .triage
 
       - id: claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         env:
           # Belt and braces: scrub secrets from any subprocess Claude might start.
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
