@@ -26,6 +26,7 @@ The idea comes from [Twitch-Channel-Points-Miner-v2](https://github.com/rdavydov
 - [Configuration](#configuration)
   - [Discord notifications](#discord-notifications)
 - [Commands](#commands)
+- [Contributing](#contributing)
 - [License](#license)
 - [Star history](#star-history)
 
@@ -57,6 +58,10 @@ How Kick tracks watching, the measurements behind these defaults, and the code l
 [RESEARCH.md](RESEARCH.md).
 
 ## Installation
+
+> 🤖 **Using an AI coding agent?** Ask it to install kick-level-farm by following
+> [AGENTS.md](AGENTS.md). It picks Docker or a prebuilt binary, explains before installing
+> anything, and leaves the session token to you.
 
 ### Docker (VPS)
 
@@ -164,6 +169,14 @@ The `KICK_DISCORD_WEBHOOK` env var works too. Run `kick-level-farm notify-test` 
 
 Global options: `-c <path>` sets the config file, and `--wait-for-login` waits for a new token
 instead of exiting when the current one expires (Docker uses this).
+
+## Contributing
+
+Issues and pull requests are welcome. Questions go to
+[Discussions](https://github.com/jakeayy/kick-level-farm/discussions). Build, check and testing
+steps, plus project rules, are in [AGENTS.md → Contributing](AGENTS.md#contributing). That
+guide applies to humans as well. If an AI agent wrote part of your change, review the result
+yourself before opening a PR.
 
 ## License
 
