@@ -178,6 +178,12 @@ steps, plus project rules, are in [AGENTS.md → Contributing](AGENTS.md#contrib
 guide applies to humans as well. If an AI agent wrote part of your change, review the result
 yourself before opening a PR.
 
+New issues and pull requests get an **automated first-pass triage** from Claude: a summary,
+likely cause or review notes, and labels. A maintainer reviews everything. Items that look like
+**prompt injection** or contain **malicious changes** (for example code that leaks tokens or
+secrets) are closed automatically. If that happens to you by mistake, say so in a comment and a
+maintainer can reopen it.
+
 ## License
 
 [GPL-3.0](LICENSE). You can use, modify and share it, but distributed modifications must stay

@@ -311,6 +311,19 @@ Every push to `main` that touches `src/**`, `Cargo.toml` or `Cargo.lock` publish
 pre-release and a new Docker image. A **stable release** is published when the `version` in
 `Cargo.toml` changes. Bump it only when the user asks for a release.
 
+### Automated triage (CI)
+
+`.github/workflows/claude-triage.yml` runs Claude on every new issue and PR. Keep its security
+design intact when editing it:
+
+- The `analyze` job uses a read-only token and read-only tools only.
+- The PR code is never checked out or run (`pull_request_target` + diff as plain text).
+- Untrusted text reaches scripts only through `env:`.
+- Only the separate `act` job (no AI) has write access.
+
+The `main` branch is protected by a ruleset (no deletion or force-push, changes via PR). Only
+repository admins bypass it.
+
 ### Pull requests
 
 Fill in [the PR template](.github/pull_request_template.md). It repeats the checks above.
