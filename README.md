@@ -80,6 +80,9 @@ docker compose logs -f                                # the bot picks the token 
 - `./data` holds `config.toml`, `.kick_token` and `analytics.jsonl`. Edit the config there,
   then run `docker compose restart`.
 - To update, run `docker compose pull && docker compose up -d`.
+- `latest` follows every update. To stay on a release, set the image in `docker-compose.yml`
+  to a version tag such as `ghcr.io/jakeayy/kick-level-farm:0.2.0`, or `:0.2` to get patch
+  updates only.
 - `docker ps` shows the container as `healthy` while the bot farms, and `unhealthy` when it
   stops (for example while waiting for a new login).
 - The container runs as `PUID`/`PGID` (default 1000) and fixes the ownership of `./data` on start.

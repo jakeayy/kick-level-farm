@@ -13,6 +13,11 @@ on:
       - ".dockerignore"
       - ".github/workflows/docker.yml"
   workflow_dispatch:
+    inputs:
+      tag_version:
+        description: "Also tag the image with the Cargo.toml version (e.g. to re-tag a release)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +27,41 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  # Decides right after the push whether this is a version bump: same rule as release.yml
+  # (no GitHub release exists yet for the Cargo.toml version). Running first avoids a race
+  # with the release workflow, which only creates the release minutes later.
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      minor: ${{ steps.plan.outputs.minor }}
+      stable: ${{ steps.plan.outputs.stable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.tag_version || false }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          stable=false
+          if [ "$FORCE" = true ] || ! gh release view "v$version" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            stable=true
+          fi
+          {
+            echo "version=$version"
+            echo "minor=${version%.*}"
+            echo "stable=$stable"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version, version tags: $stable" >> "$GITHUB_STEP_SUMMARY"
+
   # Each architecture builds natively on its own runner (no QEMU emulation).
   build:
     strategy:
@@ -80,7 +120,7 @@ jobs:
 
   merge:
     runs-on: ubuntu-24.04
-    needs: build
+    needs: [plan, build]
     permissions:
       contents: read
       packages: write
@@ -105,9 +145,11 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
+          # Version tags (e.g. 0.2.0 and 0.2) only for the build of a new release.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
+            type=raw,value=${{ needs.plan.outputs.version }},enable=${{ needs.plan.outputs.stable == 'true' }}
+            type=raw,value=${{ needs.plan.outputs.minor }},enable=${{ needs.plan.outputs.stable == 'true' }}
             type=sha,format=short
 
       - name: Create multi-arch manifest and push

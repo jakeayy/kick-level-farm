@@ -10,6 +10,11 @@ the release workflow uses that section as the release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Docker images of releases are tagged with their version (e.g. `0.2.0` and `0.2`), so a
+  deployment can be pinned to a release.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added
