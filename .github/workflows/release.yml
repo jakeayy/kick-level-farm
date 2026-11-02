@@ -1,0 +1,160 @@
+name: release
+
+# Stable release when the Cargo.toml version has no release yet, otherwise a
+# pre-release (dev build) that replaces the previous one.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Never run two release jobs at once (pre-release cleanup would race).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  BIN: kick-level-farm
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          short=$(git rev-parse --short=7 HEAD)
+          if gh release view "v$version" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            prerelease=true
+            tag="dev-$short"
+          else
+            prerelease=false
+            tag="v$version"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "### $tag (prerelease: $prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          name="$BIN-$TAG-$TARGET"
+          mkdir -p "dist/$name"
+          cp README.md "dist/$name/"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/$BIN.exe" "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          else
+            cp "target/$TARGET/release/$BIN" "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+          rm -rf "dist/$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      # Only one dev build is kept; a new stable release supersedes it too.
+      - name: Remove old pre-releases
+        run: |
+          gh release list --repo "$REPO" --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' |
+          while read -r old; do
+            [ -n "$old" ] || continue
+            echo "deleting pre-release $old"
+            gh release delete "$old" --repo "$REPO" --yes --cleanup-tag
+          done
+
+      - name: Create pre-release
+        if: needs.plan.outputs.prerelease == 'true'
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message || 'manual run' }}
+        run: |
+          {
+            echo "Development build of \`${GITHUB_SHA::7}\` (on top of v$VERSION). Replaced by every new push."
+            echo
+            echo "**Commit:** $COMMIT_MSG"
+          } > notes.md
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
+            --prerelease --title "Dev build ${GITHUB_SHA::7}" --notes-file notes.md
+
+      - name: Create release
+        if: needs.plan.outputs.prerelease != 'true'
+        run: |
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
+            --title "$TAG" --generate-notes --latest
