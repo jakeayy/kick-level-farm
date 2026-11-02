@@ -4,6 +4,7 @@ mod drops;
 mod miner;
 mod notify;
 mod realtime;
+mod selftest;
 mod watcher;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,10 @@ enum Cmd {
     Status,
     /// Send a test message to the configured Discord webhook.
     NotifyTest,
+    /// Exit 0 if the running bot wrote a recent heartbeat, 1 otherwise (Docker HEALTHCHECK).
+    Health,
+    /// Check Kick's public API still matches what the bot expects (no login needed).
+    Selftest,
 }
 
 fn init_logging(verbose: u8) {
@@ -99,6 +104,8 @@ async fn main() -> Result<()> {
             let client = api::KickClient::new(cfg.resolve_token()?)?;
             miner::status(&cfg, &client).await
         }
+        Cmd::Health => health(&cli.config),
+        Cmd::Selftest => selftest::run().await,
         Cmd::NotifyTest => {
             let cfg = config::Config::load(&cli.config)?;
             let n = notify::Notifier::new(
@@ -134,7 +141,13 @@ async fn main() -> Result<()> {
                 Err(e) => return Err(e),
             };
             let client = api::KickClient::new(token.clone())?;
-            let res = async { miner::Miner::new(cfg, client).await?.run().await }.await;
+            let res = async {
+                miner::Miner::new(cfg, client, cli.config.clone())
+                    .await?
+                    .run()
+                    .await
+            }
+            .await;
             match res {
                 Err(e) if cli.wait_for_login && api::is_unauthorized(&e) => {
                     tracing::error!("{e:#}");
@@ -146,6 +159,30 @@ async fn main() -> Result<()> {
             }
         },
     }
+}
+
+/// Reads the heartbeat file next to the config. Doesn't parse the config, so it also works
+/// (and reports unhealthy) when the bot can't start.
+fn health(config_path: &Path) -> Result<()> {
+    let path = config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(config::HEARTBEAT_FILE);
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("unhealthy: no heartbeat at {}", path.display()))?;
+    let mut parts = raw.split_whitespace().filter_map(|x| x.parse::<u64>().ok());
+    let (Some(at), Some(max_age)) = (parts.next(), parts.next()) else {
+        anyhow::bail!("unhealthy: malformed heartbeat file {}", path.display());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let age = now.saturating_sub(at);
+    if age > max_age {
+        anyhow::bail!("unhealthy: last heartbeat {age}s ago (limit {max_age}s)");
+    }
+    println!("healthy: last heartbeat {age}s ago");
+    Ok(())
 }
 
 /// Polls until a (different) token is available. Returns false if we were asked to shut down.

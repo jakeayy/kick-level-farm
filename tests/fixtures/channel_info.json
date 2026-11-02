@@ -1,0 +1,7 @@
+{"id":188532,"slug":"examplechannel","verified":true,"is_banned":false,"is_reserved":false,
+ "chatroom":{"id":1},"banner_image":null,"subscriber_badges":[],"followers_count":1000,
+ "subscription_enabled":true,"offline_banner_image":null,"playback_url":"https://example.invalid/x.m3u8",
+ "user":{"id":1,"username":"ExampleChannel"},
+ "livestream":{"id":135276139,"slug":"8a22e3b8-example","channel_id":188532,"is_live":true,
+   "viewer_count":9196,"vod_id":"01a192aa-7ca8-7b39-b0ab-8c5718095a8b","language":"English",
+   "categories":[{"id":15,"category_id":2,"name":"Just Chatting","slug":"just-chatting"}]}}

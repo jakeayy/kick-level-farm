@@ -147,6 +147,19 @@ impl Challenge {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct BoxedReward {
+    pub id: String,
+    #[serde(default)]
+    pub display_label: String,
+    #[serde(default)]
+    pub rarity: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub source_label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DropCampaign {
     pub id: String,
     pub name: String,
@@ -283,9 +296,12 @@ impl KickClient {
             let mut req = self
                 .http
                 .request(method.clone(), url)
-                .bearer_auth(&self.token)
                 .header(header::ORIGIN, MAIN)
                 .header(header::REFERER, format!("{MAIN}/"));
+            // An empty token = anonymous client (public endpoints only, used by `selftest`).
+            if !self.token.is_empty() {
+                req = req.bearer_auth(&self.token);
+            }
             if let Some(b) = body {
                 req = req.json(b);
             }
@@ -485,6 +501,29 @@ impl KickClient {
             .token)
     }
 
+    /// Rewards won from chests/drops that haven't been opened ("unboxed") on the website yet.
+    pub async fn boxed_rewards(&self) -> Result<Vec<BoxedReward>> {
+        #[derive(Deserialize)]
+        struct R {
+            #[serde(default)]
+            rewards: Vec<BoxedReward>,
+        }
+        Ok(self
+            .get::<Data<R>>(&format!("{WEB}/v1/rewards/boxed"))
+            .await?
+            .data
+            .rewards)
+    }
+
+    /// Opens boxed rewards so they become usable (same call as the website's unbox animation).
+    pub async fn mark_unboxed(&self, ids: &[String]) -> Result<Value> {
+        self.post_json(
+            &format!("{WEB}/v1/rewards/mark-unboxed"),
+            serde_json::json!({ "ids": ids }),
+        )
+        .await
+    }
+
     pub async fn streak(&self) -> Result<Value> {
         Ok(self
             .get::<Data<Value>>(&format!("{WEB}/v1/gamification/streak"))
@@ -575,4 +614,122 @@ pub fn is_unauthorized(e: &anyhow::Error) -> bool {
 
 pub fn is_not_found(e: &anyhow::Error) -> bool {
     matches!(e.downcast_ref::<ApiError>(), Some(ApiError::NotFound))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture<T: DeserializeOwned>(name: &str) -> T {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    #[test]
+    fn channel_info_live() {
+        let info: ChannelInfo = fixture("channel_info.json");
+        assert_eq!(info.id, 188532);
+        assert!(!info.is_banned);
+        let live = info.livestream.expect("live");
+        assert!(live.is_live);
+        assert_eq!(live.id, 135276139);
+        assert_eq!(
+            live.vod_id.as_deref(),
+            Some("01a192aa-7ca8-7b39-b0ab-8c5718095a8b")
+        );
+        assert_eq!(live.viewer_count, 9196);
+        assert!(live.in_category(15));
+        assert!(!live.in_category(14138));
+        assert_eq!(live.category_names(), "Just Chatting");
+    }
+
+    #[test]
+    fn channel_info_offline() {
+        let info: ChannelInfo = fixture("channel_info_offline.json");
+        assert!(info.livestream.is_none());
+    }
+
+    #[test]
+    fn level() {
+        let l = fixture::<Data<Level>>("level.json").data;
+        assert_eq!(
+            (l.level, l.progress_xp, l.total_xp, l.xp_to_next_level),
+            (13, 219, 2602, 379)
+        );
+    }
+
+    #[test]
+    fn challenge_claimability() {
+        let list = fixture::<Data<Vec<Challenge>>>("challenges.json").data;
+        let by_id = |id: &str| list.iter().find(|c| c.id == id).unwrap();
+        assert!(!by_id("daily").is_claimable(), "22/60 isn't done yet");
+        assert!(
+            by_id("done").is_claimable(),
+            "180/180 in_progress is claimable"
+        );
+        assert!(!by_id("claimed").is_claimable(), "already claimed");
+        assert_eq!(by_id("daily").condition.kind, "watch_time_minutes");
+    }
+
+    #[test]
+    fn drop_reward_claimability() {
+        let progress = fixture::<Data<Vec<DropCampaign>>>("drops_progress.json").data;
+        let mw4 = &progress[0];
+        assert!(!mw4.rewards[0].is_claimable(mw4.progress_units));
+        let riot = &progress[1];
+        assert!(!riot.rewards[0].is_claimable(riot.progress_units), "14/30");
+        assert!(!riot.user_app_connected && !riot.connect_url.is_empty());
+        // Progress reaching 100% completes a reward.
+        let done = DropReward {
+            progress: 1.0,
+            ..riot.rewards[0].clone()
+        };
+        assert!(done.is_claimable(0));
+        // Unit count alone also completes a reward.
+        let r = DropReward {
+            id: "x".into(),
+            name: "x".into(),
+            claimed: false,
+            progress: 0.0,
+            required_units: 30,
+        };
+        assert!(r.is_claimable(30) && !r.is_claimable(29));
+        assert!(!DropReward { claimed: true, ..r }.is_claimable(30));
+    }
+
+    #[test]
+    fn drop_campaigns_parse() {
+        let c = fixture::<Data<Vec<ActiveCampaign>>>("drop_campaigns.json").data;
+        assert_eq!(c.len(), 6);
+        assert_eq!(c[1].channels[0].slug, "Eddie");
+        assert!(c[0].ends_at.is_some());
+    }
+
+    #[test]
+    fn boxed_rewards_parse() {
+        #[derive(Deserialize)]
+        struct R {
+            rewards: Vec<BoxedReward>,
+        }
+        let r = fixture::<Data<R>>("boxed_rewards.json").data.rewards;
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            (
+                r[0].display_label.as_str(),
+                r[0].rarity.as_str(),
+                r[0].kind.as_str()
+            ),
+            ("Tssk", "uncommon", "emote")
+        );
+        assert_eq!(r[0].source_label, "Welcome Reward");
+    }
+
+    #[test]
+    fn unauthorized_detection_survives_context() {
+        let e = anyhow::Error::from(ApiError::Unauthorized).context("while doing something");
+        assert!(is_unauthorized(&e));
+        assert!(!is_not_found(&e));
+        assert!(is_not_found(&anyhow::Error::from(ApiError::NotFound)));
+    }
 }

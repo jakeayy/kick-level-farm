@@ -1,0 +1,9 @@
+{"data":[
+ {"id":"camp-mw4","name":"Modern Warfare 4","status":"in progress","progress_units":22,
+  "category":{"id":14138,"name":"Call of Duty: Modern Warfare 4"},"connect_url":"","user_app_connected":false,
+  "rewards":[{"id":"rw-badge","name":"MW4 Ghost Badge","claimed":false,"progress":0.0073,"required_units":3000}]},
+ {"id":"camp-riot","name":"Chat Emote - True Damage","status":"in progress","progress_units":14,
+  "category":{"id":5,"name":"League of Legends"},"connect_url":"https://auth.riotgames.com/authorize?x=y",
+  "user_app_connected":false,
+  "rewards":[{"id":"rw-riot","name":"Chat Emote - True Damage","claimed":false,"progress":0.4666,"required_units":30}]}
+],"message":"Success"}

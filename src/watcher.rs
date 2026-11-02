@@ -394,3 +394,41 @@ enum SessionEnd {
     ChannelClosed,
     Dropped(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_of(m: Message) -> Value {
+        match m {
+            Message::Text(t) => serde_json::from_str(t.as_str()).unwrap(),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn messages_match_the_web_player() {
+        let t = WatchTarget {
+            slug: "x".into(),
+            channel_id: 26239555,
+            livestream_id: 135292453,
+            vod_id: "01a19303-04b8-79fd-b4b8-bec1788c7fd8".into(),
+        };
+        assert_eq!(
+            json_of(watch_event(&t)),
+            json!({"type":"user_event","data":{"message":{
+                "name":"tracking.user.watch.livestream",
+                "channel_id":26239555,"livestream_id":135292453,
+                "vod_id":"01a19303-04b8-79fd-b4b8-bec1788c7fd8"}}})
+        );
+        // The web player sends channelId as a *string* in these two.
+        assert_eq!(
+            json_of(handshake_msg(26239555)),
+            json!({"type":"channel_handshake","data":{"message":{"channelId":"26239555"}}})
+        );
+        assert_eq!(
+            json_of(disconnect_msg(26239555)),
+            json!({"type":"channel_disconnect","data":{"message":{"channelId":"26239555"}}})
+        );
+    }
+}

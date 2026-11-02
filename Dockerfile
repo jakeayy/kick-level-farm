@@ -27,6 +27,10 @@ ENV PUID=1000 \
 VOLUME ["/data"]
 WORKDIR /data
 
+# Healthy while the bot keeps writing its heartbeat (unhealthy e.g. while waiting for a login).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=5m --retries=3 \
+  CMD ["/usr/local/bin/kick-level-farm", "-c", "/data/config.toml", "health"]
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # --wait-for-login: an expired token makes the bot wait for `login` instead of crash-looping.
 CMD ["run", "--wait-for-login"]

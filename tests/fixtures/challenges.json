@@ -1,0 +1,8 @@
+{"data":[
+ {"id":"daily","name":"Daily Reward","status":"in_progress","recurrence":"daily","featured":false,
+  "condition":{"progress":22,"threshold":60,"type":"watch_time_minutes"}},
+ {"id":"done","name":"Trick or Treat","status":"in_progress","recurrence":"daily","featured":true,
+  "condition":{"progress":180,"threshold":180,"type":"watch_time_minutes"}},
+ {"id":"claimed","name":"Old Reward","status":"claimed",
+  "condition":{"progress":60,"threshold":60,"type":"watch_time_minutes"}}
+],"message":"success"}

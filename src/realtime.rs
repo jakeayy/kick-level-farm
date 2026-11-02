@@ -21,7 +21,7 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Connected,
     PointsUpdated {
@@ -351,58 +351,7 @@ impl Task {
             return;
         }
         let Some(push) = v.get("push") else { return };
-        let channel = push
-            .get("channel")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let Some(data) = push.pointer("/pub/data") else {
-            return;
-        };
-        let event = data
-            .get("event")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        // Payload is usually a JSON-encoded string, sometimes an object.
-        let payload: Value = match data.get("data") {
-            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
-            Some(o) => o.clone(),
-            None => Value::Null,
-        };
-        let num = |k: &str| {
-            payload
-                .get(k)
-                .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
-        };
-        let ev = match event {
-            "PointsUpdated" => Some(Event::PointsUpdated {
-                channel_id: num("channel_id").unwrap_or(0) as u64,
-                points: num("points").unwrap_or(0),
-                balance: num("balance").unwrap_or(0),
-                reason: payload
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            }),
-            "GamificationLevelUp" => Some(Event::LevelUp {
-                level: num("level").unwrap_or(0) as u32,
-            }),
-            "GamificationWatchTimeGoalReached" => Some(Event::WatchGoalReached),
-            e if e.ends_with("StreamerIsLive") => {
-                channel_id_of(channel).map(|id| Event::StreamerLive { channel_id: id })
-            }
-            e if e.ends_with("LivestreamUpdated") => channel
-                .strip_prefix("private-livestream.")
-                .and_then(|id| id.parse().ok())
-                .map(|id| Event::LivestreamUpdated { livestream_id: id }),
-            e if e.ends_with("StopStreamBroadcast") => {
-                channel_id_of(channel).map(|id| Event::StreamerOffline { channel_id: id })
-            }
-            _ => {
-                tracing::trace!("realtime: {channel} {event}");
-                None
-            }
-        };
+        let ev = parse_push(push);
         if let Some(ev) = ev {
             tracing::debug!("realtime: {ev:?}");
             let _ = self.events.send(ev);
@@ -412,4 +361,146 @@ impl Task {
 
 fn channel_id_of(channel: &str) -> Option<u64> {
     channel.strip_prefix("channel.")?.parse().ok()
+}
+
+/// Turns a Centrifugo `push` frame into an [`Event`] the miner cares about.
+fn parse_push(push: &Value) -> Option<Event> {
+    let channel = push
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let data = push.pointer("/pub/data")?;
+    let event = data
+        .get("event")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Payload is usually a JSON-encoded string, sometimes an object.
+    let payload: Value = match data.get("data") {
+        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+        Some(o) => o.clone(),
+        None => Value::Null,
+    };
+    let num = |k: &str| {
+        payload
+            .get(k)
+            .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
+    };
+    match event {
+        "PointsUpdated" => Some(Event::PointsUpdated {
+            channel_id: num("channel_id").unwrap_or(0) as u64,
+            points: num("points").unwrap_or(0),
+            balance: num("balance").unwrap_or(0),
+            reason: payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        "GamificationLevelUp" => Some(Event::LevelUp {
+            level: num("level").unwrap_or(0) as u32,
+        }),
+        "GamificationWatchTimeGoalReached" => Some(Event::WatchGoalReached),
+        e if e.ends_with("StreamerIsLive") => {
+            channel_id_of(channel).map(|id| Event::StreamerLive { channel_id: id })
+        }
+        e if e.ends_with("LivestreamUpdated") => channel
+            .strip_prefix("private-livestream.")
+            .and_then(|id| id.parse().ok())
+            .map(|id| Event::LivestreamUpdated { livestream_id: id }),
+        e if e.ends_with("StopStreamBroadcast") => {
+            channel_id_of(channel).map(|id| Event::StreamerOffline { channel_id: id })
+        }
+        _ => {
+            tracing::trace!("realtime: {channel} {event}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push(channel: &str, event: &str, data: Value) -> Value {
+        json!({ "channel": channel, "pub": { "data": { "event": event, "data": data } } })
+    }
+
+    #[test]
+    fn points_updated_with_string_payload() {
+        let p = push(
+            "private-channelpoints-1",
+            "PointsUpdated",
+            Value::String(
+                r#"{"channel_id":26869410,"points":10,"balance":20,"reason":"EARNED"}"#.into(),
+            ),
+        );
+        assert_eq!(
+            parse_push(&p),
+            Some(Event::PointsUpdated {
+                channel_id: 26869410,
+                points: 10,
+                balance: 20,
+                reason: "EARNED".into()
+            })
+        );
+    }
+
+    #[test]
+    fn level_up_with_object_payload_and_string_number() {
+        let p = push("private-1", "GamificationLevelUp", json!({ "level": "14" }));
+        assert_eq!(parse_push(&p), Some(Event::LevelUp { level: 14 }));
+    }
+
+    #[test]
+    fn live_offline_and_category_changes() {
+        let live = push("channel.188532", "App\\Events\\StreamerIsLive", json!({}));
+        assert_eq!(
+            parse_push(&live),
+            Some(Event::StreamerLive { channel_id: 188532 })
+        );
+        let off = push(
+            "channel.188532",
+            "App\\Events\\StopStreamBroadcast",
+            json!({}),
+        );
+        assert_eq!(
+            parse_push(&off),
+            Some(Event::StreamerOffline { channel_id: 188532 })
+        );
+        let upd = push(
+            "private-livestream.135547435",
+            "App\\Events\\LivestreamUpdated",
+            json!({}),
+        );
+        assert_eq!(
+            parse_push(&upd),
+            Some(Event::LivestreamUpdated {
+                livestream_id: 135547435
+            })
+        );
+        let goal = push("private-1", "GamificationWatchTimeGoalReached", json!({}));
+        assert_eq!(parse_push(&goal), Some(Event::WatchGoalReached));
+    }
+
+    #[test]
+    fn unknown_or_malformed_pushes_are_ignored() {
+        assert_eq!(
+            parse_push(&push(
+                "chatrooms.1.v2",
+                "App\\Events\\ChatMessageEvent",
+                json!({})
+            )),
+            None
+        );
+        assert_eq!(parse_push(&json!({ "channel": "x" })), None);
+        // A live event on a channel name we can't parse yields nothing rather than a bogus id.
+        assert_eq!(
+            parse_push(&push(
+                "channel_abc",
+                "App\\Events\\StreamerIsLive",
+                json!({})
+            )),
+            None
+        );
+    }
 }

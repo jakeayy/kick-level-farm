@@ -1,5 +1,5 @@
 use crate::api::{self, KickClient, Level, LiveInfo, User};
-use crate::config::{Config, Priority};
+use crate::config::{Config, MAX_CONCURRENT, Priority};
 use crate::drops::{self, DropPlan};
 use crate::notify::{Notifier, NotifyEvent};
 use crate::realtime::{self, Realtime};
@@ -9,9 +9,10 @@ use serde_json::json;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const POPULAR_CACHE: Duration = Duration::from_secs(600);
 const POLITE_DELAY: Duration = Duration::from_millis(350);
@@ -19,6 +20,7 @@ const DROP_RETRY: Duration = Duration::from_secs(3600);
 const DROP_CAMPAIGNS_CACHE: Duration = Duration::from_secs(900);
 const DROP_PROGRESS_CACHE: Duration = Duration::from_secs(300);
 const CATEGORY_CACHE: Duration = Duration::from_secs(300);
+const CONFIG_CHECK: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Default)]
 struct Streamer {
@@ -38,6 +40,10 @@ struct Streamer {
     drop_label: Option<String>,
     /// Was ever used for drops (for the summary).
     drop_farmed: bool,
+    /// Listed in `streamers` in the config.
+    configured: bool,
+    /// Seen in the followed-channels list.
+    followed: bool,
 }
 
 impl Streamer {
@@ -106,6 +112,11 @@ pub struct Miner {
     drop_skip_logged: HashSet<String>,
     /// (campaign id, slug) currently farmed, to log changes once
     drop_current: Vec<(String, String)>,
+    /// Config file and its last-seen modification time (for live reload).
+    cfg_path: PathBuf,
+    cfg_mtime: Option<SystemTime>,
+    /// Plain HTTP client for heartbeat pings (no Kick headers or token).
+    health_http: reqwest::Client,
 }
 
 fn fmt_dur(d: Duration) -> String {
@@ -114,7 +125,7 @@ fn fmt_dur(d: Duration) -> String {
 }
 
 impl Miner {
-    pub async fn new(cfg: Config, client: KickClient) -> Result<Self> {
+    pub async fn new(cfg: Config, client: KickClient, cfg_path: PathBuf) -> Result<Self> {
         // `context` keeps the ApiError inside, so callers can still detect "unauthorized".
         let user = client.me().await.map_err(|e| {
             if api::is_unauthorized(&e) {
@@ -139,8 +150,10 @@ impl Miner {
         for (i, s) in cfg.streamers.iter().enumerate() {
             streamers
                 .entry(s.clone())
-                .or_insert_with(|| Streamer::new(s, i, false));
+                .or_insert_with(|| Streamer::new(s, i, false))
+                .configured = true;
         }
+        let cfg_mtime = std::fs::metadata(&cfg_path).and_then(|m| m.modified()).ok();
         Ok(Self {
             cfg,
             client,
@@ -170,6 +183,12 @@ impl Miner {
             category_live: HashMap::new(),
             drop_skip_logged: HashSet::new(),
             drop_current: Vec::new(),
+            cfg_path,
+            cfg_mtime,
+            health_http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
         })
     }
 
@@ -179,7 +198,7 @@ impl Miner {
             self.user.username,
             self.user.id,
             self.interval.as_secs(),
-            self.cfg.farm.max_concurrent,
+            MAX_CONCURRENT,
             self.streamers.len()
         );
         if self.cfg.experiments.shared_socket {
@@ -203,6 +222,8 @@ impl Miner {
         poll.reset_after(Duration::from_secs(5)); // let refresh run first
         // Set by realtime go-live/offline events: refresh shortly after.
         let mut refresh_soon: Option<tokio::time::Instant> = None;
+        let mut config_check = tokio::time::interval(CONFIG_CHECK);
+        config_check.reset();
         let ctrl_c = shutdown_signal();
         tokio::pin!(ctrl_c);
 
@@ -214,11 +235,21 @@ impl Miner {
                     break Ok(());
                 }
                 _ = refresh.tick() => {
-                    if let Err(e) = self.refresh_and_reconcile().await {
-                        if api::is_unauthorized(&e) { break Err(e); }
-                        tracing::warn!("refresh failed: {e:#}");
+                    match self.refresh_and_reconcile().await {
+                        Ok(()) => self.write_heartbeat(),
+                        Err(e) if api::is_unauthorized(&e) => break Err(e),
+                        Err(e) => tracing::warn!("refresh failed: {e:#}"),
                     }
                     self.initial_refresh_done = true;
+                }
+                _ = config_check.tick() => {
+                    if self.reload_config_if_changed().await {
+                        refresh = tokio::time::interval(Duration::from_secs(self.cfg.farm.refresh_live_secs));
+                        refresh.reset();
+                        poll = tokio::time::interval(Duration::from_secs(self.cfg.farm.poll_progress_secs));
+                        poll.reset();
+                        refresh_soon = Some(tokio::time::Instant::now() + Duration::from_secs(1));
+                    }
                 }
                 _ = async {
                     match refresh_soon {
@@ -234,9 +265,13 @@ impl Miner {
                     }
                 }
                 _ = poll.tick() => {
-                    if let Err(e) = self.poll_progress().await {
-                        if api::is_unauthorized(&e) { break Err(e); }
-                        tracing::warn!("progress poll failed: {e:#}");
+                    match self.poll_progress().await {
+                        Ok(()) => {
+                            self.write_heartbeat();
+                            self.ping_heartbeat();
+                        }
+                        Err(e) if api::is_unauthorized(&e) => break Err(e),
+                        Err(e) => tracing::warn!("progress poll failed: {e:#}"),
                     }
                     if !started_sent {
                         started_sent = true;
@@ -402,6 +437,180 @@ impl Miner {
         );
     }
 
+    /// Re-reads the config file when it changed and applies what can be applied live.
+    /// Returns true when the new config was applied.
+    async fn reload_config_if_changed(&mut self) -> bool {
+        let mtime = std::fs::metadata(&self.cfg_path)
+            .and_then(|m| m.modified())
+            .ok();
+        if mtime.is_none() || mtime == self.cfg_mtime {
+            return false;
+        }
+        self.cfg_mtime = mtime;
+        let mut new = match Config::load(&self.cfg_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("config change ignored, keeping the previous settings: {e:#}");
+                return false;
+            }
+        };
+
+        // These are wired up at startup; keep the running values and ask for a restart.
+        let mut restart = Vec::new();
+        if new.farm.realtime != self.cfg.farm.realtime {
+            new.farm.realtime = self.cfg.farm.realtime;
+            restart.push("farm.realtime");
+        }
+        if format!("{:?}", new.experiments) != format!("{:?}", self.cfg.experiments) {
+            new.experiments = self.cfg.experiments.clone();
+            restart.push("[experiments]");
+        }
+        if format!("{:?}", new.auth) != format!("{:?}", self.cfg.auth) {
+            new.auth = self.cfg.auth.clone();
+            restart.push("[auth]");
+        }
+        if !restart.is_empty() {
+            tracing::warn!("restart to apply changes to: {}", restart.join(", "));
+        }
+
+        // Streamer list: add/reorder configured channels, drop ones that no longer apply.
+        let order: HashMap<&String, usize> = new
+            .streamers
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s, i))
+            .collect();
+        for (slug, i) in &order {
+            let s = self
+                .streamers
+                .entry((*slug).clone())
+                .or_insert_with(|| Streamer::new(slug, *i, false));
+            s.configured = true;
+            s.fallback = false;
+            s.missing = false;
+            s.index = *i;
+        }
+        let mut removed = Vec::new();
+        for s in self.streamers.values_mut() {
+            if s.fallback || order.contains_key(&s.slug) {
+                continue;
+            }
+            s.configured = false;
+            if new.farm.include_followed && s.followed {
+                // Placed after configured channels; the next refresh restores follow order.
+                s.index += order.len();
+            } else {
+                removed.push(s.slug.clone());
+            }
+        }
+        for slug in removed {
+            self.stop(&slug, "removed from config").await;
+            self.streamers.remove(&slug);
+        }
+
+        self.notifier = Notifier::new(
+            new.notifications.webhook(),
+            &new.notifications.events,
+            "kick-level-farm",
+        );
+        self.cfg = new;
+        tracing::info!(
+            "config reloaded: {} configured streamer(s), followed channels {}",
+            self.cfg.streamers.len(),
+            if self.cfg.farm.include_followed {
+                "on"
+            } else {
+                "off"
+            }
+        );
+        true
+    }
+
+    /// Records that the bot is alive; read by `kick-level-farm health` (Docker HEALTHCHECK).
+    fn write_heartbeat(&self) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Healthy while updated within 3 cycles of the slower loop (+1 min slack).
+        let max_age = 3 * self
+            .cfg
+            .farm
+            .refresh_live_secs
+            .max(self.cfg.farm.poll_progress_secs)
+            + 60;
+        let path = self.cfg.heartbeat_path();
+        let tmp = path.with_extension("tmp");
+        let res = std::fs::write(&tmp, format!("{now} {max_age}\n"))
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = res {
+            tracing::debug!("heartbeat file {}: {e}", path.display());
+        }
+    }
+
+    /// Pings the configured heartbeat URL (healthchecks.io, Uptime Kuma, …) in the background.
+    fn ping_heartbeat(&self) {
+        let Some(url) = self.cfg.health.url() else {
+            return;
+        };
+        let http = self.health_http.clone();
+        tokio::spawn(async move {
+            match http.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {}
+                Ok(r) => tracing::warn!("heartbeat ping returned HTTP {}", r.status()),
+                Err(e) => tracing::warn!("heartbeat ping failed: {e}"),
+            }
+        });
+    }
+
+    /// Opens rewards that are still "boxed" so they can be used right away.
+    async fn unbox_rewards(&mut self) -> Result<()> {
+        let boxed = match self.client.boxed_rewards().await {
+            Ok(b) => b,
+            Err(e) if api::is_unauthorized(&e) => return Err(e),
+            Err(e) => {
+                tracing::debug!("boxed rewards: {e:#}");
+                return Ok(());
+            }
+        };
+        if boxed.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = boxed.iter().map(|r| r.id.clone()).collect();
+        match self.client.mark_unboxed(&ids).await {
+            Ok(_) => {
+                let names: Vec<String> = boxed
+                    .iter()
+                    .map(|r| {
+                        let what = [r.rarity.as_str(), r.kind.as_str()]
+                            .iter()
+                            .filter(|x| !x.is_empty())
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let mut name = if what.is_empty() {
+                            r.display_label.clone()
+                        } else {
+                            format!("{} ({what})", r.display_label)
+                        };
+                        if !r.source_label.is_empty() {
+                            name.push_str(&format!(" from {}", r.source_label));
+                        }
+                        name
+                    })
+                    .collect();
+                tracing::info!("📦 unboxed {}", names.join(", "));
+                self.notifier.send(
+                    NotifyEvent::RewardClaimed,
+                    format!("Unboxed {} reward(s)", boxed.len()),
+                    names.join("\n"),
+                );
+            }
+            Err(e) => tracing::warn!("unboxing rewards failed: {e:#}"),
+        }
+        Ok(())
+    }
+
     fn spawn_conn(&self, label: String) -> Connection {
         Connection::spawn(
             self.client.clone(),
@@ -425,9 +634,10 @@ impl Miner {
                             .streamers
                             .entry(slug.clone())
                             .or_insert_with(|| Streamer::new(&slug, base + i, false));
+                        s.followed = true;
                         // A followed channel that was a fallback becomes a regular one.
-                        if s.fallback {
-                            s.fallback = false;
+                        s.fallback = false;
+                        if !s.configured {
                             s.index = base + i;
                         }
                         if !f.is_live {
@@ -440,10 +650,8 @@ impl Miner {
                         .filter(|f| f.is_live)
                         .map(|f| f.channel_slug.to_lowercase())
                         .collect();
-                    self.refresh_slugs(|s| {
-                        !s.fallback && (s.index < base || live.contains(&s.slug))
-                    })
-                    .await?;
+                    self.refresh_slugs(|s| !s.fallback && (s.configured || live.contains(&s.slug)))
+                        .await?;
                 }
                 Err(e) if api::is_unauthorized(&e) => return Err(e),
                 Err(e) => {
@@ -566,7 +774,7 @@ impl Miner {
     }
 
     async fn reconcile(&mut self) -> Result<()> {
-        let max = self.cfg.farm.max_concurrent;
+        let max = MAX_CONCURRENT;
         for s in self.streamers.values_mut() {
             s.drop_label = None;
         }
@@ -1023,6 +1231,9 @@ impl Miner {
         }
         if self.cfg.drops.claim || self.cfg.drops.farm {
             self.check_drops().await?;
+        }
+        if self.cfg.farm.unbox_rewards {
+            self.unbox_rewards().await?;
         }
         self.write_analytics(&level);
         Ok(())

@@ -3,6 +3,13 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Streams watched at once. Kick awards channel points on at most 2 channels at a time (and
+/// splits drop time across everything watched), so more would only cause surprises.
+pub const MAX_CONCURRENT: usize = 2;
+
+/// Name of the heartbeat file written next to the config (used by `kick-level-farm health`).
+pub const HEARTBEAT_FILE: &str = ".heartbeat";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[derive(Default)]
@@ -14,6 +21,29 @@ pub struct Config {
     pub experiments: Experiments,
     pub notifications: Notifications,
     pub drops: DropsConfig,
+    pub health: HealthConfig,
+    /// Folder the config was loaded from (token, analytics and heartbeat live here).
+    #[serde(skip)]
+    pub base_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealthConfig {
+    /// URL pinged (GET) after every successful progress check, e.g. a healthchecks.io or
+    /// Uptime Kuma push URL. Missing pings tell you the bot stopped working.
+    /// The KICK_HEARTBEAT_URL env var overrides it.
+    pub heartbeat_url: Option<String>,
+}
+
+impl HealthConfig {
+    pub fn url(&self) -> Option<String> {
+        std::env::var("KICK_HEARTBEAT_URL")
+            .ok()
+            .or_else(|| self.heartbeat_url.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -28,7 +58,7 @@ pub struct DropsConfig {
     pub emotes: bool,
     /// In-game items (usually need a linked game account). Off unless you turn it on.
     pub items: bool,
-    /// How many of the `max_concurrent` slots drop farming may use.
+    /// How many of the 2 watch slots drop farming may use (1 or 2).
     pub slots: usize,
     /// Kick splits drop watch time across concurrently watched streams, so by default
     /// nothing else is watched while a drop is being farmed (full drop speed).
@@ -107,8 +137,10 @@ pub enum Priority {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FarmConfig {
-    /// How many streams to "watch" at the same time.
-    pub max_concurrent: usize,
+    /// Deprecated and ignored: always 2 (see `MAX_CONCURRENT`). Still accepted so older
+    /// configs keep loading.
+    #[serde(skip_serializing)]
+    pub max_concurrent: Option<usize>,
     /// Tie-breakers applied in order when choosing which live streams to watch.
     pub priority: Vec<Priority>,
     /// Farm every channel you follow (after `streamers` in `order` priority). On by default.
@@ -124,6 +156,8 @@ pub struct FarmConfig {
     pub poll_progress_secs: u64,
     /// Automatically claim gamification challenges (Daily Reward, events).
     pub claim_daily_rewards: bool,
+    /// Open ("unbox") won rewards automatically so they're ready to use.
+    pub unbox_rewards: bool,
     /// Use Kick's realtime push service for instant points / level-up / go-live events.
     /// Polling still runs as a fallback.
     pub realtime: bool,
@@ -155,7 +189,7 @@ impl Default for AuthConfig {
 impl Default for FarmConfig {
     fn default() -> Self {
         Self {
-            max_concurrent: 2,
+            max_concurrent: None,
             priority: vec![Priority::Order],
             include_followed: true,
             fallback_to_popular: true,
@@ -163,6 +197,7 @@ impl Default for FarmConfig {
             refresh_live_secs: 90,
             poll_progress_secs: 300,
             claim_daily_rewards: true,
+            unbox_rewards: true,
             realtime: true,
         }
     }
@@ -201,7 +236,16 @@ impl Config {
             })
             .filter(|s| !s.is_empty())
             .collect();
-        cfg.farm.max_concurrent = cfg.farm.max_concurrent.max(1);
+        if let Some(n) = cfg.farm.max_concurrent.take()
+            && n != MAX_CONCURRENT
+        {
+            tracing::warn!(
+                "`max_concurrent = {n}` is ignored: the bot always watches up to {MAX_CONCURRENT} streams \
+                 (Kick pays channel points on at most {MAX_CONCURRENT}). Remove it from {}",
+                path.display()
+            );
+        }
+        cfg.drops.slots = cfg.drops.slots.clamp(1, MAX_CONCURRENT);
         cfg.farm.refresh_live_secs = cfg.farm.refresh_live_secs.max(30);
         cfg.farm.poll_progress_secs = cfg.farm.poll_progress_secs.max(60);
         if cfg.farm.priority.is_empty() {
@@ -209,6 +253,7 @@ impl Config {
         }
         // Relative token/analytics paths are resolved next to the config file.
         let base = path.parent().unwrap_or(Path::new("."));
+        cfg.base_dir = base.to_path_buf();
         if cfg.auth.token_file.is_relative() {
             cfg.auth.token_file = base.join(&cfg.auth.token_file);
         }
@@ -218,6 +263,10 @@ impl Config {
             cfg.experiments.analytics_file = Some(base.join(a));
         }
         Ok(cfg)
+    }
+
+    pub fn heartbeat_path(&self) -> PathBuf {
+        self.base_dir.join(HEARTBEAT_FILE)
     }
 
     /// Token resolution order: KICK_TOKEN env var, `auth.token`, `auth.token_file`.
@@ -265,9 +314,7 @@ streamers = [
 token_file = ".kick_token"
 
 [farm]
-# How many streams to watch simultaneously. Tested: Kick seems to award channel points on at
-# most 2 channels at once (it picks which), so values above 2 add no points.
-max_concurrent = 2
+# The bot watches up to 2 streams at once (Kick pays channel points on at most 2).
 # Tie-breakers, applied in order: order | points_ascending | points_descending |
 # viewers_ascending | viewers_descending | points_enabled
 priority = ["order"]
@@ -281,6 +328,8 @@ refresh_live_secs = 90
 poll_progress_secs = 300
 # Auto-claim Daily Reward / event chests once their watch-time goal is reached.
 claim_daily_rewards = true
+# Open won rewards (emotes, badges, …) automatically so they're ready to use.
+unbox_rewards = true
 # Instant points / level-up / go-live events via Kick's realtime service (polling stays as backup).
 realtime = true
 
@@ -295,7 +344,7 @@ send_handshake = true
 analytics_file = "analytics.jsonl"
 
 [drops]
-# Actively watch streams that take part in drop campaigns (uses one of the max_concurrent slots).
+# Actively watch streams that take part in drop campaigns (uses one of the 2 watch slots).
 farm = true
 # Claim drop rewards once they reach 100%.
 claim = true
@@ -315,4 +364,74 @@ exclusive = true
 discord_webhook_url = ""
 # started | stopped | level_up | reward_claimed | drop_claimed | streamer_live | error
 events = ["started", "stopped", "level_up", "reward_claimed", "drop_claimed", "streamer_live", "error"]
+
+[health]
+# Pinged after every successful progress check (healthchecks.io, Uptime Kuma push URL, …).
+# Missing pings mean the bot stopped working. The KICK_HEARTBEAT_URL env var works too.
+heartbeat_url = ""
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes `body` to a fresh temp dir and loads it as a config.
+    fn load(name: &str, body: &str) -> Result<Config> {
+        let dir = std::env::temp_dir().join(format!("klf-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, body).unwrap();
+        Config::load(&path)
+    }
+
+    #[test]
+    fn example_config_loads_with_defaults() {
+        let c = load("example", EXAMPLE_CONFIG).unwrap();
+        assert!(c.farm.include_followed && c.farm.fallback_to_popular && c.farm.unbox_rewards);
+        assert!(c.drops.exclusive && !c.drops.items);
+        assert_eq!(c.health.heartbeat_url.as_deref(), Some(""));
+        assert_eq!(c.heartbeat_path(), c.base_dir.join(HEARTBEAT_FILE));
+        assert_eq!(
+            c.auth.token_file,
+            c.base_dir.join(".kick_token"),
+            "relative to the config"
+        );
+    }
+
+    #[test]
+    fn deprecated_max_concurrent_is_accepted_and_ignored() {
+        let c = load("maxc", "[farm]\nmax_concurrent = 5\n").unwrap();
+        assert_eq!(c.farm.max_concurrent, None);
+        assert_eq!(MAX_CONCURRENT, 2);
+    }
+
+    #[test]
+    fn values_are_clamped_and_normalised() {
+        let c = load(
+            "clamp",
+            "streamers = [\" https://kick.com/XQC \", \"\"]\n[farm]\nrefresh_live_secs = 1\npoll_progress_secs = 1\npriority = []\n[drops]\nslots = 9\n",
+        )
+        .unwrap();
+        assert_eq!(c.streamers, ["xqc"]);
+        assert_eq!(
+            (c.farm.refresh_live_secs, c.farm.poll_progress_secs),
+            (30, 60)
+        );
+        assert_eq!(c.farm.priority, [Priority::Order]);
+        assert_eq!(c.drops.slots, MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let err = load("unknown", "[farm]\nmax_concurent = 2\n").unwrap_err();
+        assert!(format!("{err:#}").contains("max_concurent"));
+    }
+
+    #[test]
+    fn token_normalisation() {
+        assert_eq!(normalize_token("  kat_abc \n"), "kat_abc");
+        assert_eq!(normalize_token("Bearer kat_abc"), "kat_abc");
+        assert_eq!(normalize_token("session_token=kat_abc"), "kat_abc");
+        assert_eq!(normalize_token("123%7Cabc"), "123|abc");
+    }
+}
