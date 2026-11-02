@@ -20,6 +20,10 @@ struct Cli {
     /// More logging (-v debug, -vv trace).
     #[arg(short, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
+    /// When the session token is rejected, wait for a new one (`login`) instead of exiting.
+    /// Meant for containers/services so they don't crash-loop.
+    #[arg(long, global = true)]
+    wait_for_login: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -48,6 +52,8 @@ fn init_logging(verbose: u8) {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        // No colour codes in `docker logs` / journald.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_target(false)
         .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new("%H:%M:%S".into()))
         .init();
@@ -84,10 +90,53 @@ async fn main() -> Result<()> {
             println!("sent — check your Discord channel");
             Ok(())
         }
-        Cmd::Run => {
+        Cmd::Run => loop {
             let cfg = config::Config::load(&cli.config)?;
-            let client = api::KickClient::new(cfg.resolve_token()?)?;
-            miner::Miner::new(cfg, client).await?.run().await
+            let token = match cfg.resolve_token() {
+                Ok(t) => t,
+                Err(e) if cli.wait_for_login => {
+                    tracing::error!("{e:#}");
+                    if !wait_for_token(&cli.config, None).await {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let client = api::KickClient::new(token.clone())?;
+            let res = async { miner::Miner::new(cfg, client).await?.run().await }.await;
+            match res {
+                Err(e) if cli.wait_for_login && api::is_unauthorized(&e) => {
+                    tracing::error!("{e:#}");
+                    if !wait_for_token(&cli.config, Some(&token)).await {
+                        return Ok(());
+                    }
+                }
+                other => return other,
+            }
+        },
+    }
+}
+
+/// Polls until a (different) token is available. Returns false if we were asked to shut down.
+async fn wait_for_token(config_path: &PathBuf, old: Option<&str>) -> bool {
+    tracing::warn!(
+        "waiting for a new session token — run `kick-level-farm login` \
+         (docker: `docker compose run --rm kick-level-farm login`)"
+    );
+    let shutdown = miner::shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return false,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {}
+        }
+        let Ok(cfg) = config::Config::load(config_path) else { continue };
+        if let Ok(t) = cfg.resolve_token() {
+            if Some(t.as_str()) != old {
+                tracing::info!("new session token found, restarting");
+                return true;
+            }
         }
     }
 }

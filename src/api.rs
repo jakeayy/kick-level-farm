@@ -320,7 +320,12 @@ impl KickClient {
     }
 
     pub async fn me(&self) -> Result<User> {
-        self.get(&format!("{MAIN}/api/v1/user")).await
+        // An invalid/expired token gets HTTP 200 with `{}` here, not a 401.
+        let v: Value = self.get(&format!("{MAIN}/api/v1/user")).await?;
+        if v.get("id").is_none() {
+            return Err(ApiError::Unauthorized.into());
+        }
+        Ok(serde_json::from_value(v)?)
     }
 
     /// Global account level (the `level` chat badge).

@@ -110,9 +110,10 @@ fn fmt_dur(d: Duration) -> String {
 
 impl Miner {
     pub async fn new(cfg: Config, client: KickClient) -> Result<Self> {
+        // `context` keeps the ApiError inside, so callers can still detect "unauthorized".
         let user = client.me().await.map_err(|e| {
             if api::is_unauthorized(&e) {
-                anyhow::anyhow!("session token rejected — run `kick-level-farm login` again")
+                e.context("session token rejected — run `kick-level-farm login` again")
             } else {
                 e
             }
@@ -190,14 +191,14 @@ impl Miner {
         poll.reset_after(Duration::from_secs(5)); // let refresh run first
         // Set by realtime go-live/offline events: refresh shortly after.
         let mut refresh_soon: Option<tokio::time::Instant> = None;
-        let ctrl_c = tokio::signal::ctrl_c();
+        let ctrl_c = shutdown_signal();
         tokio::pin!(ctrl_c);
 
         let mut started_sent = false;
         let result = loop {
             tokio::select! {
                 _ = &mut ctrl_c => {
-                    tracing::info!("Ctrl-C received, shutting down…");
+                    tracing::info!("shutdown signal received, stopping…");
                     break Ok(());
                 }
                 _ = refresh.tick() => {
@@ -254,7 +255,8 @@ impl Miner {
                 },
             }
             if self.stats.unauthorized.load(Ordering::Relaxed) {
-                break Err(anyhow::anyhow!("viewer socket rejected the session token"));
+                break Err(anyhow::Error::from(api::ApiError::Unauthorized)
+                    .context("viewer socket rejected the session token"));
             }
         };
         if let Some(rt) = self.realtime.take() {
@@ -1061,6 +1063,29 @@ impl Miner {
             );
         }
         out.trim_end().to_string()
+    }
+}
+
+/// Resolves on Ctrl-C (SIGINT) or SIGTERM (`docker stop`, systemd).
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

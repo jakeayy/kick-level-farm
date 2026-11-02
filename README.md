@@ -11,6 +11,18 @@ The protocol was reverse-engineered from the live kick.com web app (Oct 2026).
 > ⚠️ This automates an undocumented API and probably goes against Kick's ToS. Accounts can be
 > flagged. Try it on an account you can afford to lose.
 
+## Table of contents
+
+- [Features](#features)
+- [Usage](#usage)
+  - [Discord notifications](#discord-notifications)
+  - [Docker (VPS)](#docker-vps)
+- [How Kick tracks watching (findings)](#how-kick-tracks-watching-findings)
+  - [Measured results](#measured-results-bot-only-no-browser-open-oct-31-2026)
+- [Experiments](#experiments)
+- [Layout](#layout)
+- [Ideas not done yet](#ideas-not-done-yet)
+
 ## Features
 
 - Watches up to `max_concurrent` live streams at once and picks them by a chain of priorities
@@ -79,6 +91,38 @@ events = ["started", "stopped", "level_up", "reward_claimed", "drop_claimed", "s
 
 You can also pass the URL in the `KICK_DISCORD_WEBHOOK` env var. Run `kick-level-farm notify-test`
 to check that it works.
+
+### Docker (VPS)
+
+Images for `linux/amd64` and `linux/arm64` are published to
+`ghcr.io/jakeayy/kick-points-farm` on every push to `main`.
+
+```bash
+mkdir kick-farm && cd kick-farm
+curl -O https://raw.githubusercontent.com/jakeayy/kick-points-farm/main/docker-compose.yml
+docker compose up -d                                  # first start writes data/config.toml
+docker compose run --rm kick-level-farm login         # paste your session_token
+docker compose logs -f                                # the bot picks the token up within ~20s
+```
+
+- `./data` holds `config.toml`, `.kick_token` and `analytics.jsonl`. Edit the config there,
+  then run `docker compose restart`.
+- The container runs as `PUID`/`PGID` (default 1000). It fixes the ownership of `./data` on
+  start, so a root-owned folder on the VPS is fine.
+- You can set `KICK_TOKEN` and `KICK_DISCORD_WEBHOOK` in `docker-compose.yml` instead of
+  using the files.
+- **Expired token:** the bot doesn't crash-loop (and spam Discord). It logs the problem and waits
+  until you run `login` again, then resumes on its own (`--wait-for-login`).
+- `docker stop` / `docker compose down` shut down cleanly with the session summary and the
+  Discord "stopped" message.
+- Other commands: `docker compose run --rm kick-level-farm status` and
+  `docker compose run --rm kick-level-farm notify-test`.
+- To build from source instead of pulling, uncomment `build: .` in `docker-compose.yml` and
+  run `docker compose up -d --build`.
+
+GHCR packages are private by default. Either make the package public (GitHub → Packages →
+kick-points-farm → Package settings), or run `docker login ghcr.io` on the VPS with a token
+that has the `read:packages` scope.
 
 Kick's login has a captcha and 2FA, so the bot reuses a browser session instead of logging in
 itself. To get the token: DevTools → Application → Cookies → `https://kick.com` → copy the
@@ -156,9 +200,12 @@ jq -s '(.[-1].total_xp - .[0].total_xp) / (((.[-1].ts|sub("\\..*";"")+"Z"|fromda
 src/api.rs      HTTP client and response types for the endpoints above
 src/watcher.rs  viewer presence websocket (one task per connection, multiplexing supported)
 src/realtime.rs Centrifugo client for instant points / level-up / go-live events
+src/drops.rs    drop campaign planner (reward type, priority, eligibility)
 src/notify.rs   Discord webhook notifications
 src/miner.rs    orchestrator: live refresh, priority selection, fallback, polling, claiming, analytics
 src/config.rs   TOML config and token handling
+Dockerfile, docker/entrypoint.sh, docker-compose.yml   container image + VPS setup
+.github/workflows/docker.yml   builds and publishes the multi-arch image to GHCR
 ```
 
 ## Ideas not done yet

@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+data/
+.kick_token
+config.toml
+*.jsonl
+*.md
+!README.md
