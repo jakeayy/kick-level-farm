@@ -95,7 +95,8 @@ to check that it works.
 ### Docker (VPS)
 
 Images for `linux/amd64` and `linux/arm64` are published to
-`ghcr.io/jakeayy/kick-points-farm` on every push to `main`.
+`ghcr.io/jakeayy/kick-points-farm` on every push to `main`. Each is about 24 MB: a static musl
+binary of about 4 MB on Alpine. Each architecture is built natively on GitHub's runners.
 
 ```bash
 mkdir kick-farm && cd kick-farm

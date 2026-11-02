@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# ---- build ----
-FROM rust:1-slim-trixie AS build
+# ---- build: fully static musl binary ----
+FROM rust:1-alpine AS build
+RUN apk add --no-cache musl-dev gcc
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -12,10 +13,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/kick-level-farm /kick-level-farm
 
 # ---- runtime ----
-FROM debian:trixie-slim
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates tzdata \
- && rm -rf /var/lib/apt/lists/*
+FROM alpine:3
+# ca-certificates: TLS roots; tzdata: TZ for log timestamps; su-exec: drop root in the entrypoint.
+RUN apk add --no-cache ca-certificates tzdata su-exec
 
 COPY --from=build /kick-level-farm /usr/local/bin/kick-level-farm
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -12,7 +12,7 @@ if [ "$(id -u)" = "0" ]; then
     chown "$PUID:$PGID" /data
     # Only touch top-level files we own (config, token, analytics).
     find /data -mindepth 1 -maxdepth 1 ! -user "$PUID" -exec chown "$PUID:$PGID" {} + 2>/dev/null || true
-    AS_USER="setpriv --reuid=$PUID --regid=$PGID --clear-groups"
+    AS_USER="su-exec $PUID:$PGID"
 else
     AS_USER=""
 fi

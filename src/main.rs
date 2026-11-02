@@ -48,19 +48,30 @@ fn init_logging(verbose: u8) {
         1 => "kick_level_farm=debug",
         _ => "kick_level_farm=trace",
     };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::prelude::*;
+    // RUST_LOG keeps working with the usual `target=level,...` syntax.
+    let filter: Targets = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| default.parse().expect("valid default filter"));
     tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        // The builder caps at INFO by default; let `Targets` decide instead.
+        .with_max_level(tracing::Level::TRACE)
         // No colour codes in `docker logs` / journald.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_target(false)
         .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new("%H:%M:%S".into()))
+        .finish()
+        .with(filter)
         .init();
 }
 
-#[tokio::main]
+// The bot is I/O-bound and light: one thread is plenty.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    // rustls is built with the `ring` provider only (smaller than aws-lc).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
