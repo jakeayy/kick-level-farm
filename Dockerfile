@@ -19,6 +19,7 @@ RUN apk add --no-cache ca-certificates tzdata su-exec
 
 COPY --from=build /kick-level-farm /usr/local/bin/kick-level-farm
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY LICENSE /usr/share/licenses/kick-level-farm/LICENSE
 
 ENV PUID=1000 \
     PGID=1000 \

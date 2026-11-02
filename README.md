@@ -1,8 +1,9 @@
 # kick-level-farm
 
-[![Release](https://img.shields.io/github/v/release/jakeayy/kick-points-farm?label=release&sort=semver)](https://github.com/jakeayy/kick-points-farm/releases/latest)
-[![Pre-release](https://img.shields.io/github/v/release/jakeayy/kick-points-farm?include_prereleases&label=pre-release)](https://github.com/jakeayy/kick-points-farm/releases)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/jakeayy/kick-points-farm/pkgs/container/kick-points-farm)
+[![Release](https://img.shields.io/github/v/release/jakeayy/kick-level-farm?label=release&sort=semver)](https://github.com/jakeayy/kick-level-farm/releases/latest)
+[![Pre-release](https://img.shields.io/github/v/release/jakeayy/kick-level-farm?include_prereleases&label=pre-release)](https://github.com/jakeayy/kick-level-farm/releases)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/jakeayy/kick-level-farm/pkgs/container/kick-level-farm)
+[![License](https://img.shields.io/github/license/jakeayy/kick-level-farm)](LICENSE)
 
 A lightweight Rust bot that farms **Kick.com account levels (XP)**, **channel points**,
 **Daily Reward chests** and **drops** by emulating the kick.com web player's viewer presence. It
@@ -25,6 +26,7 @@ The idea comes from [Twitch-Channel-Points-Miner-v2](https://github.com/rdavydov
 - [Configuration](#configuration)
   - [Discord notifications](#discord-notifications)
 - [Commands](#commands)
+- [License](#license)
 - [Star history](#star-history)
 
 ## Features
@@ -60,7 +62,7 @@ How Kick tracks watching, the measurements behind these defaults, and the code l
 
 ```bash
 mkdir kick-farm && cd kick-farm
-curl -O https://raw.githubusercontent.com/jakeayy/kick-points-farm/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/jakeayy/kick-level-farm/main/docker-compose.yml
 docker compose up -d                                  # first start writes data/config.toml
 docker compose run --rm kick-level-farm login         # paste your session_token
 docker compose logs -f                                # the bot picks the token up within ~20s
@@ -79,7 +81,7 @@ docker compose logs -f                                # the bot picks the token 
 
 ### Prebuilt binaries (Linux / Windows)
 
-Download from [Releases](https://github.com/jakeayy/kick-points-farm/releases):
+Download from [Releases](https://github.com/jakeayy/kick-level-farm/releases):
 
 | File | For |
 |---|---|
@@ -163,12 +165,17 @@ The `KICK_DISCORD_WEBHOOK` env var works too. Run `kick-level-farm notify-test` 
 Global options: `-c <path>` sets the config file, and `--wait-for-login` waits for a new token
 instead of exiting when the current one expires (Docker uses this).
 
+## License
+
+[GPL-3.0](LICENSE). You can use, modify and share it, but distributed modifications must stay
+open source under the same license.
+
 ## Star history
 
-<a href="https://www.star-history.com/#jakeayy/kick-points-farm&Date">
+<a href="https://www.star-history.com/#jakeayy/kick-level-farm&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jakeayy/kick-points-farm&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jakeayy/kick-points-farm&type=Date" />
-    <img alt="Star history chart" src="https://api.star-history.com/svg?repos=jakeayy/kick-points-farm&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jakeayy/kick-level-farm&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jakeayy/kick-level-farm&type=Date" />
+    <img alt="Star history chart" src="https://api.star-history.com/svg?repos=jakeayy/kick-level-farm&type=Date" />
   </picture>
 </a>

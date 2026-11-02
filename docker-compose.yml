@@ -1,6 +1,6 @@
 services:
   kick-level-farm:
-    image: ghcr.io/jakeayy/kick-points-farm:latest
+    image: ghcr.io/jakeayy/kick-level-farm:latest
     # Or build from source instead of pulling:
     # build: .
     container_name: kick-level-farm
