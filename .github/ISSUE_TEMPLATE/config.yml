@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/jakeayy/kick-points-farm#readme
+    about: Installation, configuration and commands.
+  - name: Research notes
+    url: https://github.com/jakeayy/kick-points-farm/blob/main/RESEARCH.md
+    about: How Kick tracks watching, measured results and protocol details.

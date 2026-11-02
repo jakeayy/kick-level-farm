@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    // Rust language support (completion, inline errors, clippy on save)
+    "rust-lang.rust-analyzer",
+    // Cargo.toml / config.toml syntax and validation
+    "tamasfe.even-better-toml",
+    // Debugging Rust binaries
+    "vadimcn.vscode-lldb",
+    // Validation and autocomplete for .github/workflows
+    "github.vscode-github-actions",
+    // Dockerfile / docker-compose.yml support
+    "ms-azuretools.vscode-docker"
+  ]
+}
