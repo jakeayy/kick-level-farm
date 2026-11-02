@@ -96,7 +96,10 @@ jobs:
                 ]
               }
             }
+          # Haiku for issues (cheap), Sonnet for PRs (spotting malicious code needs more).
+          # Full IDs are pinned so an alias update can't silently change cost or behaviour.
           claude_args: |
+            --model ${{ github.event_name == 'issues' && 'claude-haiku-5-5' || 'claude-sonnet-5-5' }}
             --max-turns 15
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task"
