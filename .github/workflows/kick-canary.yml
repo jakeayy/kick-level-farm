@@ -1,0 +1,123 @@
+name: kick-canary
+
+# Nightly check that Kick hasn't changed the parts of its web app and API the bot relies on.
+# No Kick login is used. On failure it opens (or updates) one issue; when checks pass again,
+# it closes that issue.
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: kick-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ISSUE_TITLE: "Kick API check failed"
+      UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # 1. Public API responses still parse with the bot's own types.
+      - name: API selftest
+        id: selftest
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./target/release/kick-level-farm selftest 2>&1 | tee selftest.txt
+
+      # 2. The web player still uses the viewer-socket protocol the bot emulates.
+      - name: Web player protocol
+        id: protocol
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # The constant may be wrapped by rustfmt, so read the next line too.
+          token=$(grep -A1 'pub const WS_CLIENT_TOKEN' src/api.rs | grep -oE '[0-9a-f]{64}' | head -n1)
+          if [ -z "$token" ]; then
+            echo "✗ could not read WS_CLIENT_TOKEN from src/api.rs" | tee protocol.txt
+            exit 1
+          fi
+          slug=$(curl -fsS --http2 -A "$UA" "https://kick.com/stream/livestreams/en?page=1&limit=5&sort=desc" \
+                 | jq -r '.data[0].channel.slug')
+          echo "channel page: https://kick.com/$slug"
+          mkdir -p chunks
+          curl -fsS --http2 -A "$UA" "https://kick.com/$slug" -o page.html
+          grep -oE 'https://assets\.kick\.com/[^"\\]+\.js' page.html | sort -u > chunks.txt
+          echo "chunks: $(wc -l < chunks.txt)"
+          i=0
+          while read -r url; do
+            i=$((i + 1))
+            curl -fsS --http2 -A "$UA" -o "chunks/$i.js" "$url" || echo "warn: could not fetch $url"
+          done < chunks.txt
+          check() {
+            if grep -qF -- "$1" chunks/*.js; then echo "✓ $2"; else echo "✗ $2 (\`$1\` not found)"; fi
+          }
+          {
+            check "$token" "viewer-socket client token (X-CLIENT-TOKEN) unchanged"
+            check '"/viewer/v1/token"' "viewer token endpoint"
+            check 'viewer/v1/connect' "viewer socket endpoint"
+            check '"user_event"' "user_event message"
+            check '"tracking.user.watch.livestream"' "watch-tracking event name"
+            check '"channel_handshake"' "channel_handshake message"
+          } | tee protocol.txt
+          # Decided from the report: a variable set inside the piped block wouldn't survive.
+          ! grep -q '^✗' protocol.txt
+
+      - name: Open, update or close the tracking issue
+        if: always()
+        env:
+          SELFTEST: ${{ steps.selftest.outcome }}
+          PROTOCOL: ${{ steps.protocol.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --repo "$REPO" --state open --label kick-api-change \
+                       --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number // empty')
+          if [ "$SELFTEST" = success ] && [ "$PROTOCOL" = success ]; then
+            echo "all checks passed"
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$REPO" --reason completed \
+                --comment "✅ All Kick API checks pass again ([run]($RUN_URL))."
+            fi
+            exit 0
+          fi
+          {
+            echo "The nightly Kick API check found differences ([run]($RUN_URL))."
+            echo
+            echo "**API selftest:** \`$SELFTEST\`"
+            echo '```'; cat selftest.txt 2>/dev/null || echo "(no output)"; echo '```'
+            echo "**Web player protocol:** \`$PROTOCOL\`"
+            echo '```'; cat protocol.txt 2>/dev/null || echo "(no output)"; echo '```'
+            echo
+            echo "Next steps: open a channel on kick.com with DevTools, compare what the web player"
+            echo "sends with \`RESEARCH.md\`, then update the code and RESEARCH.md."
+          } > body.md
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file body.md
+          else
+            gh issue create --repo "$REPO" --title "$ISSUE_TITLE" --label kick-api-change --body-file body.md
+          fi
+          exit 1

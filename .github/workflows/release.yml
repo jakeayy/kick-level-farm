@@ -115,12 +115,23 @@ jobs:
   release:
     needs: [plan, build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write # build provenance attestations
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       TAG: ${{ needs.plan.outputs.tag }}
       VERSION: ${{ needs.plan.outputs.version }}
     steps:
+      # Only for CHANGELOG.md (release notes).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
@@ -130,6 +141,31 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      # Signed SLSA provenance: proves each archive was built by this workflow from this commit.
+      # Verify with: gh attestation verify <file> --repo jakeayy/kick-level-farm
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          # Prints the body of a "## [name]" section of CHANGELOG.md (empty if missing).
+          section() {
+            awk -v h="## [$1]" 'index($0, h) == 1 { f = 1; next } /^## \[/ || /^\[[^]]+\]: / { if (f) exit } f' CHANGELOG.md 2>/dev/null
+          }
+          verify='Verify a download: `gh attestation verify <file> --repo '"$REPO"'`'
+          if [ "${{ needs.plan.outputs.prerelease }}" = true ]; then
+            section Unreleased > changes.md
+          else
+            section "$VERSION" > changes.md
+          fi
+          # Trim leading/trailing blank lines.
+          sed -i -e '/./,$!d' -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' changes.md
+          printf '\n\n---\n%s\n' "$verify" > footer.md
+          echo "changelog section: $(wc -l < changes.md) line(s)"
 
       # Only one dev build is kept; a new stable release supersedes it too.
       - name: Remove old pre-releases
@@ -151,6 +187,13 @@ jobs:
             echo "Development build of \`${GITHUB_SHA::7}\` (on top of v$VERSION). Replaced by every new push."
             echo
             echo "**Commit:** $COMMIT_MSG"
+            if [ -s changes.md ]; then
+              echo
+              echo "### Unreleased changes"
+              echo
+              cat changes.md
+            fi
+            cat footer.md
           } > notes.md
           gh release create "$TAG" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
             --prerelease --title "Dev build ${GITHUB_SHA::7}" --notes-file notes.md
@@ -158,5 +201,12 @@ jobs:
       - name: Create release
         if: needs.plan.outputs.prerelease != 'true'
         run: |
-          gh release create "$TAG" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
-            --title "$TAG" --generate-notes --latest
+          if [ -s changes.md ]; then
+            cat changes.md footer.md > notes.md
+            gh release create "$TAG" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "$TAG" --notes-file notes.md --latest
+          else
+            echo "::warning::No '## [$VERSION]' section in CHANGELOG.md, using generated notes"
+            gh release create "$TAG" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "$TAG" --generate-notes --latest
+          fi
