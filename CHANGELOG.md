@@ -10,6 +10,8 @@ the release workflow uses that section as the release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
 ### Added
 
 - **Rewards are unboxed automatically** (`[farm] unbox_rewards`), so won emotes and badges are
@@ -42,5 +44,6 @@ First release.
 - Discord webhook notifications.
 - Docker image (amd64/arm64) and static Linux and Windows binaries.
 
-[Unreleased]: https://github.com/jakeayy/kick-level-farm/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jakeayy/kick-level-farm/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jakeayy/kick-level-farm/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jakeayy/kick-level-farm/releases/tag/v0.1.0
