@@ -1,7 +1,7 @@
 # kick-level-farm
 
-A lightweight Rust bot that farms **Kick.com account levels (XP)**, **channel points** and
-**Daily Reward chests** by emulating the kick.com web player's viewer presence. It doesn't
+A lightweight Rust bot that farms **Kick.com account levels (XP)**, **channel points**,
+**Daily Reward chests** and **drops** by emulating the kick.com web player's viewer presence. It doesn't
 download any video. Each watched stream costs one small websocket, which comes to a few KB per
 minute.
 
@@ -24,6 +24,32 @@ The protocol was reverse-engineered from the live kick.com web app (Oct 2026).
   in `streamers` and, if `include_followed` is on, channels you follow.
 - Polls level/XP and channel points, logs the deltas and estimates XP per hour.
 - Claims Daily Reward and event challenges (e.g. *Trick or Treat*) automatically.
+- **Drops:** the bot actively watches streams that take part in drop campaigns, then claims each
+  reward once it reaches 100%.
+  - Priority is **badges → emotes → items**. Ties go to the campaign ending soonest, then the
+    reward closest to done.
+  - **Items are only farmed when you turn them on** (`[drops] items = true`).
+  - Campaigns that need a linked game account are skipped once Kick reports the account isn't
+    linked, since their rewards couldn't be claimed anyway.
+  - **Kick splits drop watch time across all streams you watch at once.** In a test, 2 streams
+    gave half the drop speed (+6 min of progress in 13 min, against +12 with the drops stream
+    alone). So by default (`[drops] exclusive = true`) the bot watches **only** the drops
+    stream while a drop is being farmed. Set it to `false` to keep farming points on other
+    channels at half drop speed.
+  - Channels you follow or list are preferred when they qualify, so they keep earning points
+    too. A drops-only stream earns no tracked points, the same as the popular fallback.
+  - **Category changes:** the bot subscribes to each watched livestream's realtime updates. If
+    a drops stream switches to another category, it logs the change and moves to another
+    qualifying stream within seconds. Every refresh also re-checks the category as a backup.
+  - Kick has no reward-type field, so the type comes from the name ("…Badge", "…Emote").
+    Rewards from publishers that need a linked account count as items, and other Kick-native
+    rewards count as emotes.
+- **Realtime updates:** subscribes to Kick's push service, the same one the website uses. Point
+  gains, level-ups and channels going live or offline show up instantly instead of waiting for
+  the next poll. Polling stays on as a backup.
+- **Discord notifications** through a webhook. They cover start/stop (with the session
+  summary), level-ups, claimed rewards and drops, streamers going live, and errors such as an
+  expired token. You choose which events are sent.
 - Reconnects with backoff, follows livestream restarts (a new `livestream_id`), and shuts down
   cleanly on Ctrl-C with a session summary.
 - Built for experiments. The `[experiments]` section and the `analytics.jsonl` log let you measure
@@ -35,9 +61,24 @@ The protocol was reverse-engineered from the live kick.com web app (Oct 2026).
 cargo build --release
 ./target/release/kick-level-farm init      # writes config.toml
 ./target/release/kick-level-farm login     # paste your session_token cookie
-./target/release/kick-level-farm status    # level, XP, challenges, points per streamer
+./target/release/kick-level-farm status    # level, XP, challenges, drop plan + progress, points
+./target/release/kick-level-farm notify-test   # check the Discord webhook
 ./target/release/kick-level-farm           # start farming (-v for debug logs)
 ```
+
+### Discord notifications
+
+In Discord, go to Server Settings → Integrations → Webhooks → New Webhook and copy the URL. Then
+add it to `config.toml`:
+
+```toml
+[notifications]
+discord_webhook_url = "https://discord.com/api/webhooks/..."
+events = ["started", "stopped", "level_up", "reward_claimed", "drop_claimed", "streamer_live", "error"]
+```
+
+You can also pass the URL in the `KICK_DISCORD_WEBHOOK` env var. Run `kick-level-farm notify-test`
+to check that it works.
 
 Kick's login has a captcha and 2FA, so the bot reuses a browser session instead of logging in
 itself. To get the token: DevTools → Application → Cookies → `https://kick.com` → copy the
@@ -57,7 +98,11 @@ itself. To get the token: DevTools → Application → Cookies → `https://kick
 | Level / XP | `GET https://web.kick.com/api/v1/gamification/user/level` → `level, progress_xp, xp_to_next_level, total_xp` (shown in chat as the `level` badge) |
 | Points | `GET /api/v2/channels/{slug}/points` |
 | Daily rewards | `GET web.kick.com/api/v1/gamification/challenges` (`condition.type = watch_time_minutes`), claim with `POST …/challenges/{id}/claim` |
-| Other | `/v1/gamification/streak`, `/v1/gamification/collectibles`, `/v1/rewards`, `/v1/drops/claim`, realtime (Centrifugo) channel `private-channelpoints-{userId}` |
+| Live by category | `GET web.kick.com/api/v1/livestreams?category_id={id}&limit=100&sort=viewer_count_desc` |
+| Drops | `GET web.kick.com/api/v1/drops/progress` → campaigns with `progress_units` (minutes) and `rewards[{id, claimed, progress 0..1, required_units}]`; claim with `POST /v1/drops/claim {reward_id, campaign_id}`. All campaigns: `GET /v1/drops/campaigns`. Some campaigns need `connect_url` (a linked game account). |
+| Realtime | `POST web.kick.com/api/v1/realtime/connection` → Centrifugo websocket URL; `POST /v1/realtime/auth/connection {client_id}` → connection JWT (~45 min TTL); `POST /v1/realtime/auth/channel {channel}` → per-private-channel JWT. JSON protocol: `{"connect":{"token","name":"js"},"id":1}`, `{"subscribe":{"channel","token","flag":1},"id":n}`. The server pings with `{}` and expects `{}` back. |
+| Realtime events | `private-livestream.{id}` (needs a token) → `App\Events\LivestreamUpdated` (title/category changes); `private-channelpoints-{uid}` → `PointsUpdated {channel_id, points, balance, reason}`; `private-{uid}` → `GamificationLevelUp {level}`, `GamificationWatchTimeGoalReached`; `channel.{channel_id}` → `App\Events\StreamerIsLive`, `App\Events\StopStreamBroadcast`; `drops_category_{id}` → `drops_campaign_started` |
+| Other | `/v1/gamification/streak`, `/v1/gamification/collectibles`, `/v1/rewards` |
 
 ### Measured results (bot only, no browser open, Oct 31 2026)
 
@@ -66,6 +111,8 @@ itself. To get the token: DevTools → Application → Cookies → `https://kick
 | 2 streams, 10 min | +16 (about 4 XP per 2 min) | **+20 on each channel** | +8 (counted once, not per stream) |
 | 1 stream, 8 min | +12 (same rate), level 3 → 4 | +10 on the one channel | same |
 | 2 streams, 13 min | +24 (about 110 XP/h) | +20 on each channel | Daily Reward **auto-claimed** at 60/60 |
+| Drops: MW4 stream + 1 other, 13 min | about 120 XP/h | — | MW4 drop +6 min (**half speed**) |
+| Drops: MW4 stream alone, 13 min | about 110 XP/h | — | MW4 drop +12 min (full speed) |
 | 2 streams, 10 min, **30s event interval** (4× the messages) | +16, no change | +20 on each channel, no change | no change |
 | **5 streams**, 15 min (3 followed + 2 explicit, 1 with points off) | +32 (~120 XP/h), level 4 → 5 | only **2 channels earned at a time**: buddha +20, noodlewolf +20, niter +10 (first 2 min only), rraenee +0 | no change |
 
@@ -108,14 +155,14 @@ jq -s '(.[-1].total_xp - .[0].total_xp) / (((.[-1].ts|sub("\\..*";"")+"Z"|fromda
 ```
 src/api.rs      HTTP client and response types for the endpoints above
 src/watcher.rs  viewer presence websocket (one task per connection, multiplexing supported)
+src/realtime.rs Centrifugo client for instant points / level-up / go-live events
+src/notify.rs   Discord webhook notifications
 src/miner.rs    orchestrator: live refresh, priority selection, fallback, polling, claiming, analytics
 src/config.rs   TOML config and token handling
 ```
 
 ## Ideas not done yet
 
-- Subscribe to the realtime `private-channelpoints-{userId}` channel for instant point updates
-  instead of polling.
-- Auto-claim drops (`/v1/drops/claim`) and spend points on rewards (`/rewards/{id}/redeem`).
+- Spend points on rewards (`/api/v2/channels/{slug}/rewards/{id}/redeem`).
 - Run several accounts from one process.
-- Notifications through Discord/Telegram webhooks.
+- Telegram notifications.

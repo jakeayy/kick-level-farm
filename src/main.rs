@@ -1,6 +1,9 @@
 mod api;
 mod config;
+mod drops;
 mod miner;
+mod notify;
+mod realtime;
 mod watcher;
 
 use anyhow::{Context, Result};
@@ -29,8 +32,10 @@ enum Cmd {
     Init,
     /// Save your Kick session token (the `session_token` cookie).
     Login,
-    /// Show level, XP, challenges and points on configured streamers.
+    /// Show level, XP, challenges, drops and points on configured streamers.
     Status,
+    /// Send a test message to the configured Discord webhook.
+    NotifyTest,
 }
 
 fn init_logging(verbose: u8) {
@@ -67,6 +72,17 @@ async fn main() -> Result<()> {
             let cfg = config::Config::load(&cli.config)?;
             let client = api::KickClient::new(cfg.resolve_token()?)?;
             miner::status(&cfg, &client).await
+        }
+        Cmd::NotifyTest => {
+            let cfg = config::Config::load(&cli.config)?;
+            let n = notify::Notifier::new(cfg.notifications.webhook(), &[notify::NotifyEvent::Started], "kick-level-farm");
+            if !n.enabled() {
+                anyhow::bail!("no Discord webhook configured ([notifications] discord_webhook_url or KICK_DISCORD_WEBHOOK)");
+            }
+            n.send(notify::NotifyEvent::Started, "Test notification", "kick-level-farm can post to this channel ✅");
+            n.flush().await;
+            println!("sent — check your Discord channel");
+            Ok(())
         }
         Cmd::Run => {
             let cfg = config::Config::load(&cli.config)?;

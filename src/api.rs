@@ -75,6 +75,26 @@ pub struct LiveInfo {
     pub vod_id: Option<String>,
     #[serde(default, alias = "viewers")]
     pub viewer_count: u64,
+    #[serde(default)]
+    pub categories: Vec<LiveCategory>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveCategory {
+    pub id: u64,
+    #[serde(default)]
+    pub name: String,
+}
+
+impl LiveInfo {
+    pub fn in_category(&self, category_id: u64) -> bool {
+        self.categories.iter().any(|c| c.id == category_id)
+    }
+
+    pub fn category_names(&self) -> String {
+        let n: Vec<&str> = self.categories.iter().map(|c| c.name.as_str()).collect();
+        if n.is_empty() { "?".into() } else { n.join(", ") }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +134,80 @@ impl Challenge {
         }
         matches!(s.as_str(), "completed" | "claimable" | "ready" | "ready_to_claim")
             || (self.condition.threshold > 0 && self.condition.progress >= self.condition.threshold)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropCampaign {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub progress_units: u64,
+    #[serde(default)]
+    pub rewards: Vec<DropReward>,
+    #[serde(default)]
+    pub user_app_connected: bool,
+    #[serde(default)]
+    pub connect_url: String,
+    pub category: Option<DropCategory>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropCategory {
+    #[serde(default)]
+    pub id: u64,
+    pub name: String,
+}
+
+/// A campaign from the public list (`/v1/drops/campaigns`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveCampaign {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    pub starts_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub ends_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub connect_url: String,
+    pub category: DropCategory,
+    /// Participating channels. Empty = any stream in the category counts.
+    #[serde(default)]
+    pub channels: Vec<CampaignChannel>,
+    #[serde(default)]
+    pub rewards: Vec<CampaignReward>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CampaignChannel {
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CampaignReward {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub required_units: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropReward {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub claimed: bool,
+    /// 0.0 ..= 1.0
+    #[serde(default)]
+    pub progress: f64,
+    #[serde(default)]
+    pub required_units: u64,
+}
+
+impl DropReward {
+    pub fn is_claimable(&self, campaign_units: u64) -> bool {
+        !self.claimed
+            && (self.progress >= 0.9999 || (self.required_units > 0 && campaign_units >= self.required_units))
     }
 }
 
@@ -160,17 +254,27 @@ impl KickClient {
     }
 
     async fn request<T: DeserializeOwned>(&self, method: Method, url: &str) -> Result<T> {
+        self.request_body(method, url, None).await
+    }
+
+    async fn post_json<T: DeserializeOwned>(&self, url: &str, body: Value) -> Result<T> {
+        self.request_body(Method::POST, url, Some(&body)).await
+    }
+
+    async fn request_body<T: DeserializeOwned>(&self, method: Method, url: &str, body: Option<&Value>) -> Result<T> {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            let res = self
+            let mut req = self
                 .http
                 .request(method.clone(), url)
                 .bearer_auth(&self.token)
                 .header(header::ORIGIN, MAIN)
-                .header(header::REFERER, format!("{MAIN}/"))
-                .send()
-                .await;
+                .header(header::REFERER, format!("{MAIN}/"));
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+            let res = req.send().await;
             let res = match res {
                 Ok(r) => r,
                 Err(e) if attempt < 3 => {
@@ -252,6 +356,86 @@ impl KickClient {
 
     pub async fn claim_challenge(&self, id: &str) -> Result<Value> {
         self.request(Method::POST, &format!("{WEB}/v1/gamification/challenges/{id}/claim")).await
+    }
+
+    /// Watch-progress for drop campaigns you have participated in.
+    pub async fn drops_progress(&self) -> Result<Vec<DropCampaign>> {
+        Ok(self.get::<Data<Vec<DropCampaign>>>(&format!("{WEB}/v1/drops/progress")).await?.data)
+    }
+
+    pub async fn drop_campaigns(&self) -> Result<Vec<ActiveCampaign>> {
+        Ok(self.get::<Data<Vec<ActiveCampaign>>>(&format!("{WEB}/v1/drops/campaigns")).await?.data)
+    }
+
+    /// Live channel slugs in a category, most viewers first.
+    pub async fn live_in_category(&self, category_id: u64, limit: u32) -> Result<Vec<String>> {
+        let v: Value = self
+            .get(&format!("{WEB}/v1/livestreams?category_id={category_id}&limit={limit}&sort=viewer_count_desc"))
+            .await?;
+        Ok(v.pointer("/data/livestreams")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.pointer("/channel/slug")?.as_str().map(str::to_lowercase))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    pub async fn claim_drop(&self, reward_id: &str, campaign_id: &str) -> Result<Value> {
+        self.post_json(
+            &format!("{WEB}/v1/drops/claim"),
+            serde_json::json!({"reward_id": reward_id, "campaign_id": campaign_id}),
+        )
+        .await
+    }
+
+    /// Websocket URL of the realtime (Centrifugo) service.
+    pub async fn realtime_url(&self, user_id: u64) -> Result<String> {
+        let v: Value = self
+            .post_json(
+                &format!("{WEB}/v1/realtime/connection"),
+                serde_json::json!({
+                    "client": {"id": user_id.to_string(), "type": "web"},
+                    "capabilities": {"accepted_providers": [{"provider": "centrifugo"}]}
+                }),
+            )
+            .await?;
+        v.pointer("/data/connections")
+            .and_then(Value::as_array)
+            .and_then(|c| {
+                c.iter()
+                    .find(|x| x.get("provider").and_then(Value::as_str) == Some("centrifugo"))
+                    .and_then(|x| x.pointer("/credentials/url")?.as_str().map(str::to_owned))
+            })
+            .ok_or_else(|| anyhow!("no centrifugo connection offered: {v}"))
+    }
+
+    pub async fn realtime_connection_token(&self, user_id: u64) -> Result<String> {
+        #[derive(Deserialize)]
+        struct T {
+            token: String,
+        }
+        Ok(self
+            .post_json::<Data<T>>(
+                &format!("{WEB}/v1/realtime/auth/connection"),
+                serde_json::json!({"client_id": user_id.to_string()}),
+            )
+            .await?
+            .data
+            .token)
+    }
+
+    pub async fn realtime_channel_token(&self, channel: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct T {
+            token: String,
+        }
+        Ok(self
+            .post_json::<Data<T>>(&format!("{WEB}/v1/realtime/auth/channel"), serde_json::json!({"channel": channel}))
+            .await?
+            .data
+            .token)
     }
 
     pub async fn streak(&self) -> Result<Value> {

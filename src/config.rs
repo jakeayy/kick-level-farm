@@ -1,3 +1,4 @@
+use crate::notify::NotifyEvent;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,59 @@ pub struct Config {
     /// Channel slugs to farm, in order of preference (used by the `order` priority).
     pub streamers: Vec<String>,
     pub experiments: Experiments,
+    pub notifications: Notifications,
+    pub drops: DropsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DropsConfig {
+    /// Actively watch streams that take part in drop campaigns.
+    pub farm: bool,
+    /// Claim drop rewards once they reach 100%.
+    pub claim: bool,
+    /// Which reward types to farm. Priority: badges > emotes > items.
+    pub badges: bool,
+    pub emotes: bool,
+    /// In-game items (usually need a linked game account). Off unless you turn it on.
+    pub items: bool,
+    /// How many of the `max_concurrent` slots drop farming may use.
+    pub slots: usize,
+    /// Kick splits drop watch time across concurrently watched streams, so by default
+    /// nothing else is watched while a drop is being farmed (full drop speed).
+    pub exclusive: bool,
+}
+
+impl Default for DropsConfig {
+    fn default() -> Self {
+        Self { farm: true, claim: true, badges: true, emotes: true, items: false, slots: 1, exclusive: true }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notifications {
+    /// Discord webhook URL (Server Settings -> Integrations -> Webhooks). Empty = disabled.
+    /// The KICK_DISCORD_WEBHOOK env var overrides it.
+    pub discord_webhook_url: Option<String>,
+    /// Which events to send.
+    pub events: Vec<NotifyEvent>,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { discord_webhook_url: None, events: NotifyEvent::all() }
+    }
+}
+
+impl Notifications {
+    pub fn webhook(&self) -> Option<String> {
+        std::env::var("KICK_DISCORD_WEBHOOK")
+            .ok()
+            .or_else(|| self.discord_webhook_url.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -58,6 +112,9 @@ pub struct FarmConfig {
     pub poll_progress_secs: u64,
     /// Automatically claim gamification challenges (Daily Reward, events).
     pub claim_daily_rewards: bool,
+    /// Use Kick's realtime push service for instant points / level-up / go-live events.
+    /// Polling still runs as a fallback.
+    pub realtime: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -81,6 +138,8 @@ impl Default for Config {
             farm: FarmConfig::default(),
             streamers: Vec::new(),
             experiments: Experiments::default(),
+            notifications: Notifications::default(),
+            drops: DropsConfig::default(),
         }
     }
 }
@@ -102,6 +161,7 @@ impl Default for FarmConfig {
             refresh_live_secs: 90,
             poll_progress_secs: 300,
             claim_daily_rewards: true,
+            realtime: true,
         }
     }
 }
@@ -215,6 +275,8 @@ refresh_live_secs = 90
 poll_progress_secs = 300
 # Auto-claim Daily Reward / event chests once their watch-time goal is reached.
 claim_daily_rewards = true
+# Instant points / level-up / go-live events via Kick's realtime service (polling stays as backup).
+realtime = true
 
 [experiments]
 # Multiplex every watched channel over a single viewer websocket.
@@ -225,4 +287,26 @@ shared_socket = false
 send_handshake = true
 # JSON-lines log of every progress poll, for measuring XP/hour.
 analytics_file = "analytics.jsonl"
+
+[drops]
+# Actively watch streams that take part in drop campaigns (uses one of the max_concurrent slots).
+farm = true
+# Claim drop rewards once they reach 100%.
+claim = true
+# Reward types to farm. Priority: badges > emotes > items.
+badges = true
+emotes = true
+# In-game items usually need a linked game account. Only farmed when switched on.
+items = false
+slots = 1
+# Kick splits drop watch time across all streams watched at once (tested: 2 streams = half
+# speed). With exclusive = true only the drops stream is watched while a drop is farmed.
+exclusive = true
+
+[notifications]
+# Discord webhook (Server Settings -> Integrations -> Webhooks). Leave empty to disable.
+# The KICK_DISCORD_WEBHOOK env var works too.
+discord_webhook_url = ""
+# started | stopped | level_up | reward_claimed | drop_claimed | streamer_live | error
+events = ["started", "stopped", "level_up", "reward_claimed", "drop_claimed", "streamer_live", "error"]
 "#;

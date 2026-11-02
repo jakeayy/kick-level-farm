@@ -1,5 +1,8 @@
 use crate::api::{self, KickClient, Level, LiveInfo, User};
 use crate::config::{Config, Priority};
+use crate::drops::{self, DropPlan};
+use crate::notify::{NotifyEvent, Notifier};
+use crate::realtime::{self, Realtime};
 use crate::watcher::{Connection, WatchStats, WatchTarget};
 use anyhow::{Result, bail};
 use serde_json::json;
@@ -12,6 +15,10 @@ use std::time::{Duration, Instant};
 
 const POPULAR_CACHE: Duration = Duration::from_secs(600);
 const POLITE_DELAY: Duration = Duration::from_millis(350);
+const DROP_RETRY: Duration = Duration::from_secs(3600);
+const DROP_CAMPAIGNS_CACHE: Duration = Duration::from_secs(900);
+const DROP_PROGRESS_CACHE: Duration = Duration::from_secs(300);
+const CATEGORY_CACHE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Default)]
 struct Streamer {
@@ -27,6 +34,10 @@ struct Streamer {
     start_points: Option<i64>,
     points_enabled: Option<bool>,
     watched: Duration,
+    /// Set while this stream is picked for drop farming (reset every reconcile).
+    drop_label: Option<String>,
+    /// Was ever used for drops (for the summary).
+    drop_farmed: bool,
 }
 
 impl Streamer {
@@ -73,6 +84,23 @@ pub struct Miner {
     last_level: Option<Level>,
     started: Instant,
     claimed: HashSet<String>,
+    notifier: Notifier,
+    realtime: Option<Realtime>,
+    /// highest level we've already announced
+    announced_level: u32,
+    /// false until the first live refresh finished (avoids "went live" spam on startup)
+    initial_refresh_done: bool,
+    drops_claimed: HashSet<String>,
+    drops_failed: HashMap<String, Instant>,
+    drop_units_logged: HashMap<String, u64>,
+    drop_campaigns: Vec<api::ActiveCampaign>,
+    drop_campaigns_at: Option<Instant>,
+    drop_progress: Vec<api::DropCampaign>,
+    drop_progress_at: Option<Instant>,
+    category_live: HashMap<u64, (Instant, Vec<String>)>,
+    drop_skip_logged: HashSet<String>,
+    /// (campaign id, slug) currently farmed, to log changes once
+    drop_current: Vec<(String, String)>,
 }
 
 fn fmt_dur(d: Duration) -> String {
@@ -96,6 +124,7 @@ impl Miner {
             }
             None => Duration::from_secs(client.watch_event_interval().await.unwrap_or(120)),
         };
+        let notifier = Notifier::new(cfg.notifications.webhook(), &cfg.notifications.events, "kick-level-farm");
         let mut streamers = HashMap::new();
         for (i, s) in cfg.streamers.iter().enumerate() {
             streamers.entry(s.clone()).or_insert_with(|| Streamer::new(s, i, false));
@@ -115,6 +144,20 @@ impl Miner {
             last_level: None,
             started: Instant::now(),
             claimed: HashSet::new(),
+            notifier,
+            realtime: None,
+            announced_level: 0,
+            initial_refresh_done: false,
+            drops_claimed: HashSet::new(),
+            drops_failed: HashMap::new(),
+            drop_units_logged: HashMap::new(),
+            drop_campaigns: Vec::new(),
+            drop_campaigns_at: None,
+            drop_progress: Vec::new(),
+            drop_progress_at: None,
+            category_live: HashMap::new(),
+            drop_skip_logged: HashSet::new(),
+            drop_current: Vec::new(),
         })
     }
 
@@ -132,12 +175,25 @@ impl Miner {
             self.shared = Some(self.spawn_conn("shared".into()));
         }
 
+        if self.notifier.enabled() {
+            tracing::info!("discord notifications enabled");
+        }
+        let mut rt_rx = None;
+        if self.cfg.farm.realtime {
+            let (rt, rx) = Realtime::spawn(self.client.clone(), self.user.id);
+            self.realtime = Some(rt);
+            rt_rx = Some(rx);
+        }
+
         let mut refresh = tokio::time::interval(Duration::from_secs(self.cfg.farm.refresh_live_secs));
         let mut poll = tokio::time::interval(Duration::from_secs(self.cfg.farm.poll_progress_secs));
         poll.reset_after(Duration::from_secs(5)); // let refresh run first
+        // Set by realtime go-live/offline events: refresh shortly after.
+        let mut refresh_soon: Option<tokio::time::Instant> = None;
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
 
+        let mut started_sent = false;
         let result = loop {
             tokio::select! {
                 _ = &mut ctrl_c => {
@@ -149,18 +205,61 @@ impl Miner {
                         if api::is_unauthorized(&e) { break Err(e); }
                         tracing::warn!("refresh failed: {e:#}");
                     }
+                    self.initial_refresh_done = true;
+                }
+                _ = async {
+                    match refresh_soon {
+                        Some(t) => tokio::time::sleep_until(t).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    refresh_soon = None;
+                    refresh.reset();
+                    if let Err(e) = self.refresh_and_reconcile().await {
+                        if api::is_unauthorized(&e) { break Err(e); }
+                        tracing::warn!("refresh failed: {e:#}");
+                    }
                 }
                 _ = poll.tick() => {
                     if let Err(e) = self.poll_progress().await {
                         if api::is_unauthorized(&e) { break Err(e); }
                         tracing::warn!("progress poll failed: {e:#}");
                     }
+                    if !started_sent {
+                        started_sent = true;
+                        let lvl = self.last_level.as_ref().map(|l| format!("level **{}** ({}/{} XP)", l.level, l.progress_xp, l.progress_xp + l.xp_to_next_level)).unwrap_or_default();
+                        let watching: Vec<&str> = self.active.keys().map(String::as_str).collect();
+                        self.notifier.send(
+                            NotifyEvent::Started,
+                            format!("Farming started as {}", self.user.username),
+                            format!("{lvl}\nWatching: {}", if watching.is_empty() { "nothing live yet".to_string() } else { watching.join(", ") }),
+                        );
+                    }
                 }
+                ev = async {
+                    match rt_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match ev {
+                    Some(ev) => match self.on_realtime(ev).await {
+                        Ok(true) => {
+                            refresh_soon.get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(3));
+                        }
+                        Ok(false) => {}
+                        Err(e) if api::is_unauthorized(&e) => break Err(e),
+                        Err(e) => tracing::warn!("realtime handling failed: {e:#}"),
+                    },
+                    None => rt_rx = None,
+                },
             }
             if self.stats.unauthorized.load(Ordering::Relaxed) {
                 break Err(anyhow::anyhow!("viewer socket rejected the session token"));
             }
         };
+        if let Some(rt) = self.realtime.take() {
+            rt.shutdown();
+        }
 
         // Best-effort final poll for the summary.
         let _ = self.poll_progress().await;
@@ -171,8 +270,92 @@ impl Miner {
         if let Some(c) = self.shared.take() {
             c.shutdown().await;
         }
-        self.summary();
+        let summary = self.summary();
+        println!("{summary}");
+        match &result {
+            Ok(()) => self.notifier.send(NotifyEvent::Stopped, "Farming stopped", format!("```\n{summary}\n```")),
+            Err(e) => self.notifier.send(
+                NotifyEvent::Error,
+                "Farming stopped with an error",
+                format!("{e:#}\n```\n{summary}\n```"),
+            ),
+        }
+        self.notifier.flush().await;
         result
+    }
+
+    /// Returns true when a live-status refresh should happen soon.
+    async fn on_realtime(&mut self, ev: realtime::Event) -> Result<bool> {
+        use realtime::Event as E;
+        match ev {
+            E::Connected => Ok(false),
+            E::Unauthorized => Err(api::ApiError::Unauthorized.into()),
+            E::PointsUpdated { channel_id, points, balance, reason } => {
+                // Only channels we farm points on (configured/followed), never the fallback.
+                if let Some(s) = self
+                    .streamers
+                    .values_mut()
+                    .find(|s| s.channel_id == Some(channel_id) && !s.fallback)
+                {
+                    if s.points == Some(balance) {
+                        return Ok(false); // a poll already picked this balance up
+                    }
+                    s.start_points.get_or_insert(balance - points);
+                    s.points = Some(balance);
+                    let session = balance - s.start_points.unwrap_or(balance);
+                    if reason.eq_ignore_ascii_case("redeemed") {
+                        tracing::info!("{}: {points:+} points redeemed (now {balance})", s.slug);
+                    } else {
+                        tracing::info!("{}: {points:+} channel points (now {balance}, {session:+} this session) [live]", s.slug);
+                    }
+                }
+                Ok(false)
+            }
+            E::LevelUp { level } => {
+                self.announce_level(level, None);
+                Ok(false)
+            }
+            E::WatchGoalReached => {
+                tracing::info!("watch-time goal reached — checking rewards");
+                if self.cfg.farm.claim_daily_rewards {
+                    self.check_challenges().await?;
+                }
+                Ok(false)
+            }
+            E::LivestreamUpdated { livestream_id } => {
+                let slug = self.active.iter().find(|(_, a)| a.target.livestream_id == livestream_id).map(|(s, _)| s.clone());
+                match slug {
+                    Some(slug) => {
+                        tracing::debug!("realtime: {slug} updated its stream (title/category) — re-checking");
+                        Ok(true)
+                    }
+                    None => Ok(false),
+                }
+            }
+            E::StreamerLive { channel_id } | E::StreamerOffline { channel_id } => {
+                let known = self.streamers.values().any(|s| s.channel_id == Some(channel_id) && !s.fallback);
+                if known {
+                    tracing::debug!("realtime: live status changed for channel {channel_id}");
+                }
+                Ok(known)
+            }
+        }
+    }
+
+    fn announce_level(&mut self, level: u32, lvl: Option<&Level>) {
+        if level <= self.announced_level {
+            return;
+        }
+        let first = self.announced_level == 0;
+        self.announced_level = level;
+        if first {
+            return; // baseline, not a level-up
+        }
+        tracing::info!("★ LEVEL UP! now level {level}");
+        let detail = lvl
+            .map(|l| format!("Total XP: {}\nNext level in {} XP", l.total_xp, l.xp_to_next_level))
+            .unwrap_or_default();
+        self.notifier.send(NotifyEvent::LevelUp, format!("Level up! {} is now level {level}", self.user.username), detail);
     }
 
     fn spawn_conn(&self, label: String) -> Connection {
@@ -275,6 +458,19 @@ impl Miner {
             let is_live = s.live.is_some();
             if is_live != was_live && !s.fallback {
                 tracing::info!("{} is now {}", slug, if is_live { "LIVE" } else { "offline" });
+                if is_live && self.initial_refresh_done {
+                    let viewers = s.viewers();
+                    self.notifier.send(
+                        NotifyEvent::StreamerLive,
+                        format!("{slug} is live"),
+                        format!("https://kick.com/{slug} — {viewers} viewers"),
+                    );
+                }
+            }
+            if !s.fallback {
+                if let Some(rt) = &self.realtime {
+                    rt.watch_channel(info.id);
+                }
             }
             need_settings = is_live && s.points_enabled.is_none();
         }
@@ -319,15 +515,33 @@ impl Miner {
 
     async fn reconcile(&mut self) -> Result<()> {
         let max = self.cfg.farm.max_concurrent;
+        for s in self.streamers.values_mut() {
+            s.drop_label = None;
+        }
+
+        // 1) Drop campaigns get the first slot(s): they're time-limited, points aren't.
+        let mut desired: Vec<String> = Vec::new();
+        if self.cfg.drops.farm && self.cfg.drops.slots > 0 {
+            match self.pick_drop_streams(self.cfg.drops.slots.min(max)).await {
+                Ok(d) => desired = d,
+                Err(e) if api::is_unauthorized(&e) => return Err(e),
+                Err(e) => tracing::warn!("drop planning failed: {e:#}"),
+            }
+        }
+
+        // 2) Channel points on configured/followed channels.
         let mut cands: Vec<&Streamer> = self
             .streamers
             .values()
-            .filter(|s| !s.fallback && s.target().is_some())
+            .filter(|s| !s.fallback && s.target().is_some() && !desired.contains(&s.slug))
             .collect();
         cands.sort_by(|a, b| self.cmp_priority(a, b));
-        let mut desired: Vec<String> = cands.iter().take(max).map(|s| s.slug.clone()).collect();
+        // Drop progress is split across concurrent streams, so keep the drop stream alone.
+        let room = if self.cfg.drops.exclusive && !desired.is_empty() { 0 } else { max.saturating_sub(desired.len()) };
+        let more: Vec<String> = cands.iter().take(room).map(|s| s.slug.clone()).collect();
+        desired.extend(more);
 
-        // Popular fallback is for level XP only. XP is per account, so a single stream is
+        // 3) Popular fallback is for level XP only. XP is per account, so a single stream is
         // enough, and it's only used when none of the configured/followed channels are live.
         if desired.is_empty() && self.cfg.farm.fallback_to_popular {
             self.fill_with_popular(&mut desired, 1).await?;
@@ -365,12 +579,147 @@ impl Miner {
         Ok(())
     }
 
+    async fn refresh_drop_data(&mut self) -> Result<()> {
+        if self.drop_campaigns_at.is_none_or(|t| t.elapsed() > DROP_CAMPAIGNS_CACHE) {
+            match self.client.drop_campaigns().await {
+                Ok(c) => {
+                    self.drop_campaigns = c;
+                    self.drop_campaigns_at = Some(Instant::now());
+                }
+                Err(e) if api::is_unauthorized(&e) => return Err(e),
+                Err(e) => tracing::warn!("could not fetch drop campaigns: {e:#}"),
+            }
+        }
+        if self.drop_progress_at.is_none_or(|t| t.elapsed() > DROP_PROGRESS_CACHE) {
+            match self.client.drops_progress().await {
+                Ok(p) => {
+                    self.drop_progress = p;
+                    self.drop_progress_at = Some(Instant::now());
+                }
+                Err(e) if api::is_unauthorized(&e) => return Err(e),
+                Err(e) => tracing::debug!("drops progress: {e:#}"),
+            }
+        }
+        Ok(())
+    }
+
+    async fn pick_drop_streams(&mut self, slots: usize) -> Result<Vec<String>> {
+        self.refresh_drop_data().await?;
+        let mut skipped = HashMap::new();
+        let plans = drops::plan(&self.drop_campaigns, &self.drop_progress, &self.cfg.drops, &mut skipped);
+        for (id, msg) in skipped {
+            if self.drop_skip_logged.insert(id) {
+                tracing::info!("{msg}");
+            }
+        }
+        // Streams we were farming drops on that left the campaign's category.
+        for (cid, slug) in &self.drop_current {
+            let (Some(plan), Some(s)) = (plans.iter().find(|p| &p.campaign_id == cid), self.streamers.get(slug)) else {
+                continue;
+            };
+            if let Some(live) = s.live.as_ref().filter(|l| !l.in_category(plan.category_id)) {
+                tracing::warn!(
+                    "drops: {slug} switched category to {} — it no longer counts for `{}` ({}), switching stream",
+                    live.category_names(),
+                    plan.campaign_name,
+                    plan.category_name
+                );
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut current = Vec::new();
+        for plan in &plans {
+            if out.len() >= slots {
+                break;
+            }
+            match self.find_drop_stream(plan, &out).await? {
+                Some(slug) => {
+                    if let Some(s) = self.streamers.get_mut(&slug) {
+                        s.drop_label = Some(format!("{} `{}`", plan.kind.label(), plan.reward_name));
+                        s.drop_farmed = true;
+                    }
+                    current.push((plan.campaign_id.clone(), slug.clone()));
+                    if !self.drop_current.contains(&(plan.campaign_id.clone(), slug.clone())) {
+                        tracing::info!(
+                            "drops: farming {} `{}` from `{}` ({}) on {slug} — {} min to go",
+                            plan.kind.label(),
+                            plan.reward_name,
+                            plan.campaign_name,
+                            plan.category_name,
+                            plan.remaining_minutes
+                        );
+                    }
+                    out.push(slug);
+                }
+                None => tracing::debug!("drops: no live stream for `{}` ({})", plan.campaign_name, plan.category_name),
+            }
+        }
+        if current.is_empty() && !self.drop_current.is_empty() {
+            tracing::info!("drops: nothing farmable live right now");
+        }
+        self.drop_current = current;
+        Ok(out)
+    }
+
+    async fn category_live(&mut self, category_id: u64) -> Result<Vec<String>> {
+        if let Some((t, v)) = self.category_live.get(&category_id) {
+            if t.elapsed() < CATEGORY_CACHE {
+                return Ok(v.clone());
+            }
+        }
+        let v = match self.client.live_in_category(category_id, 100).await {
+            Ok(v) => v,
+            Err(e) if api::is_unauthorized(&e) => return Err(e),
+            Err(e) => {
+                tracing::debug!("live streams in category {category_id}: {e:#}");
+                Vec::new()
+            }
+        };
+        self.category_live.insert(category_id, (Instant::now(), v.clone()));
+        Ok(v)
+    }
+
+    async fn find_drop_stream(&mut self, plan: &DropPlan, exclude: &[String]) -> Result<Option<String>> {
+        let ok = |s: &Streamer| {
+            !exclude.contains(&s.slug)
+                && s.target().is_some()
+                && s.live.as_ref().is_some_and(|l| l.in_category(plan.category_id))
+                && plan.accepts(&s.slug)
+        };
+        // 1) A configured/followed channel that qualifies also keeps earning points.
+        let mut regs: Vec<&Streamer> = self.streamers.values().filter(|s| !s.fallback && ok(s)).collect();
+        regs.sort_by(|a, b| self.cmp_priority(a, b));
+        if let Some(s) = regs.first() {
+            return Ok(Some(s.slug.clone()));
+        }
+        // 2) Stay on the stream we're already farming this campaign on.
+        if let Some(slug) = self.active.keys().find(|k| self.streamers.get(*k).is_some_and(|s| ok(s))) {
+            return Ok(Some(slug.clone()));
+        }
+        // 3) Any live participating stream in the campaign's category.
+        let live = self.category_live(plan.category_id).await?;
+        let mut pool: Vec<String> = live.into_iter().filter(|s| plan.accepts(s) && !exclude.contains(s)).take(6).collect();
+        if pool.is_empty() && !plan.channels.is_empty() {
+            // Participating channels may be beyond the first page of the category.
+            pool = plan.channels.iter().filter(|s| !exclude.contains(s)).take(8).cloned().collect();
+        }
+        for slug in pool {
+            self.streamers.entry(slug.clone()).or_insert_with(|| Streamer::new(&slug, usize::MAX, true));
+            self.refresh_one(&slug).await?;
+            if self.streamers.get(&slug).is_some_and(|s| ok(s)) {
+                return Ok(Some(slug));
+            }
+            tokio::time::sleep(POLITE_DELAY).await;
+        }
+        Ok(None)
+    }
+
     async fn fill_with_popular(&mut self, desired: &mut Vec<String>, max: usize) -> Result<()> {
         // Keep fallback streams we're already on (sticky) as long as they are live.
         let mut current: Vec<String> = self
             .active
             .keys()
-            .filter(|k| self.streamers.get(*k).is_some_and(|s| s.fallback && s.target().is_some()))
+            .filter(|k| self.streamers.get(*k).is_some_and(|s| s.fallback && !s.drop_farmed && s.target().is_some()))
             .cloned()
             .collect();
         current.sort();
@@ -424,7 +773,12 @@ impl Miner {
         tracing::info!(
             "▶ watching {}{} (channel {}, livestream {}{})",
             t.slug,
-            if s.fallback { " [fallback: level XP only]" } else { "" },
+            match (&s.drop_label, s.fallback) {
+                (Some(d), true) => format!(" [drops: {d}]"),
+                (Some(d), false) => format!(" [drops: {d} + points]"),
+                (None, true) => " [fallback: level XP only]".to_string(),
+                (None, false) => String::new(),
+            },
             t.channel_id,
             t.livestream_id,
             match s.points_enabled {
@@ -445,11 +799,17 @@ impl Miner {
                 Some(c)
             }
         };
+        if let Some(rt) = &self.realtime {
+            rt.watch_livestream(t.livestream_id);
+        }
         self.active.insert(t.slug.clone(), Active { target: t, since: Instant::now(), conn });
     }
 
     async fn stop(&mut self, slug: &str, why: &str) {
         let Some(a) = self.active.remove(slug) else { return };
+        if let Some(rt) = &self.realtime {
+            rt.unwatch_livestream(a.target.livestream_id);
+        }
         let elapsed = a.since.elapsed();
         if let Some(s) = self.streamers.get_mut(slug) {
             s.watched += elapsed;
@@ -478,11 +838,7 @@ impl Miner {
             .map(|l| level.total_xp.saturating_sub(l.total_xp))
             .unwrap_or(0);
         let hours = self.started.elapsed().as_secs_f64() / 3600.0;
-        if let Some(prev) = &self.last_level {
-            if level.level > prev.level {
-                tracing::info!("★ LEVEL UP! {} -> {}", prev.level, level.level);
-            }
-        }
+        self.announce_level(level.level, Some(&level));
         tracing::info!(
             "level {} — {}/{} XP to next (total {}, +{} since last poll, +{} this session{})",
             level.level,
@@ -529,6 +885,9 @@ impl Miner {
         if self.cfg.farm.claim_daily_rewards {
             self.check_challenges().await?;
         }
+        if self.cfg.drops.claim || self.cfg.drops.farm {
+            self.check_drops().await?;
+        }
         self.write_analytics(&level);
         Ok(())
     }
@@ -549,6 +908,11 @@ impl Miner {
                     Ok(v) => {
                         self.claimed.insert(c.id.clone());
                         tracing::info!("🎁 claimed `{}`: {}", c.name, v.to_string().chars().take(400).collect::<String>());
+                        self.notifier.send(
+                            NotifyEvent::RewardClaimed,
+                            format!("Claimed {}", c.name),
+                            format!("{}/{} {} reached — open kick.com to unbox it.", c.condition.progress, c.condition.threshold, c.condition.kind.replace('_', " ")),
+                        );
                     }
                     Err(e) => tracing::warn!("claiming `{}` failed: {e:#}", c.name),
                 }
@@ -556,6 +920,69 @@ impl Miner {
                 tracing::info!("challenge `{}`: {}/{} min watched", c.name, c.condition.progress, c.condition.threshold);
             } else {
                 tracing::debug!("challenge `{}` [{key}]", c.name);
+            }
+        }
+        Ok(())
+    }
+
+    async fn check_drops(&mut self) -> Result<()> {
+        let campaigns = match self.client.drops_progress().await {
+            Ok(c) => c,
+            Err(e) if api::is_unauthorized(&e) => return Err(e),
+            Err(e) => {
+                tracing::debug!("drops progress: {e:#}");
+                return Ok(());
+            }
+        };
+        self.drop_progress = campaigns.clone();
+        self.drop_progress_at = Some(Instant::now());
+        for c in campaigns {
+            let needs_link = !c.connect_url.is_empty() && !c.user_app_connected;
+            let category = c.category.as_ref().map(|x| x.name.as_str()).unwrap_or("?");
+            for r in &c.rewards {
+                if !self.cfg.drops.claim {
+                    break;
+                }
+                if !r.is_claimable(c.progress_units) || self.drops_claimed.contains(&r.id) {
+                    continue;
+                }
+                if self.drops_failed.get(&r.id).is_some_and(|t| t.elapsed() < DROP_RETRY) {
+                    continue;
+                }
+                match self.client.claim_drop(&r.id, &c.id).await {
+                    Ok(_) => {
+                        self.drops_claimed.insert(r.id.clone());
+                        self.drop_progress_at = None; // re-plan with fresh progress
+                        tracing::info!("🎁 claimed drop `{}` ({} / {category})", r.name, c.name);
+                        self.notifier.send(
+                            NotifyEvent::DropClaimed,
+                            format!("Drop claimed: {}", r.name),
+                            format!("Campaign **{}** ({category})", c.name),
+                        );
+                    }
+                    Err(e) => {
+                        self.drops_failed.insert(r.id.clone(), Instant::now());
+                        let hint = if needs_link {
+                            format!(" — this campaign needs a linked account: {}", c.connect_url.split('?').next().unwrap_or(""))
+                        } else {
+                            String::new()
+                        };
+                        tracing::warn!("claiming drop `{}` failed: {e:#}{hint}", r.name);
+                    }
+                }
+                tokio::time::sleep(POLITE_DELAY).await;
+            }
+            // Progress towards the next unclaimed reward (logged only when it changes).
+            if let Some(next) = c.rewards.iter().find(|r| !r.claimed && !self.drops_claimed.contains(&r.id)) {
+                if self.drop_units_logged.insert(c.id.clone(), c.progress_units) != Some(c.progress_units) {
+                    tracing::info!(
+                        "drop `{}` ({category}): {}/{} min{}",
+                        next.name,
+                        c.progress_units.min(next.required_units),
+                        next.required_units,
+                        if needs_link { " (needs linked account to claim)" } else { "" }
+                    );
+                }
             }
         }
         Ok(())
@@ -593,11 +1020,13 @@ impl Miner {
         }
     }
 
-    fn summary(&self) {
+    fn summary(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
         let elapsed = self.started.elapsed();
-        println!("\n──────── session summary ({}) ────────", fmt_dur(elapsed));
+        let _ = writeln!(out, "──────── session summary ({}) ────────", fmt_dur(elapsed));
         if let (Some(a), Some(b)) = (&self.start_level, &self.last_level) {
-            println!(
+            let _ = writeln!(out, 
                 "level {} -> {}   XP {} -> {} (+{})",
                 a.level,
                 b.level,
@@ -614,7 +1043,8 @@ impl Miner {
         rows.sort_by(|a, b| b.watched.cmp(&a.watched));
         for s in rows {
             if s.fallback {
-                println!("  {:<24} watched {:>7}  [fallback: level XP only]", s.slug, fmt_dur(s.watched));
+                let tag = if s.drop_farmed { "[drops only]" } else { "[fallback: level XP only]" };
+                let _ = writeln!(out, "  {:<24} watched {:>7}  {tag}", s.slug, fmt_dur(s.watched));
                 continue;
             }
             let gained = match (s.start_points, s.points) {
@@ -622,7 +1052,7 @@ impl Miner {
                 _ => "-".into(),
             };
             let events = s.channel_id.map(|id| self.stats.events_for(id)).unwrap_or(0);
-            println!(
+            let _ = writeln!(out, 
                 "  {:<24} watched {:>7}  events {:>4}  points {:>8} ({gained})",
                 s.slug,
                 fmt_dur(s.watched),
@@ -630,6 +1060,7 @@ impl Miner {
                 s.points.map(|p| p.to_string()).unwrap_or("-".into()),
             );
         }
+        out.trim_end().to_string()
     }
 }
 
@@ -662,6 +1093,39 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
                 c.status,
                 if c.is_claimable() { "  <- claimable" } else { "" }
             );
+        }
+    }
+    if let (Ok(campaigns), Ok(progress)) = (client.drop_campaigns().await, client.drops_progress().await) {
+        let mut skipped = HashMap::new();
+        let plans = drops::plan(&campaigns, &progress, &cfg.drops, &mut skipped);
+        for p in &plans {
+            println!(
+                "drop plan: {:<6} {:<28} {:>5} min left  `{}` ({}){}",
+                p.kind.label(),
+                p.reward_name,
+                p.remaining_minutes,
+                p.campaign_name,
+                p.category_name,
+                if p.channels.is_empty() { String::new() } else { format!(", {} channel(s)", p.channels.len()) }
+            );
+        }
+        for msg in skipped.values() {
+            println!("drop plan: {msg}");
+        }
+    }
+    if let Ok(drops) = client.drops_progress().await {
+        for c in drops {
+            for r in c.rewards.iter().filter(|r| !r.claimed) {
+                println!(
+                    "drop:    {:<30} {:>4}/{:<4} min  ({}){}{}",
+                    r.name,
+                    c.progress_units.min(r.required_units),
+                    r.required_units,
+                    c.name,
+                    if r.is_claimable(c.progress_units) { "  <- claimable" } else { "" },
+                    if !c.connect_url.is_empty() && !c.user_app_connected { "  [needs linked account]" } else { "" }
+                );
+            }
         }
     }
     if !cfg.streamers.is_empty() {
