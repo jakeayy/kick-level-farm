@@ -35,3 +35,6 @@ the `latest` Docker image) get security fixes.
 - **Dependabot** opens update PRs for crates, Actions and Docker base images, and alerts on
   vulnerable dependencies.
 - **Secret scanning** with push protection blocks commits that contain known token formats.
+- **Signed build provenance** for every release download and Docker image. Check one with
+  `gh attestation verify <file> --repo jakeayy/kick-level-farm`, or for the image
+  `gh attestation verify oci://ghcr.io/jakeayy/kick-level-farm:latest --repo jakeayy/kick-level-farm`.

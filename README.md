@@ -36,8 +36,8 @@ The idea comes from [Twitch-Channel-Points-Miner-v2](https://github.com/rdavydov
   account, so when none of your channels are live the bot watches **one** popular stream to keep
   earning it. No channel points are farmed on that stream.
 - **Channel points:** farmed on every channel you follow (and any extra channels you list),
-  picked by a configurable priority. Kick pays points on at most 2 channels at once, so
-  `max_concurrent = 2` is the default.
+  picked by a configurable priority. Up to 2 streams are watched at once, because Kick pays
+  channel points on at most 2 channels at a time.
 - **Drops:** watches streams that take part in drop campaigns and claims rewards when they're
   done.
   - Priority is **badges → emotes → items**. Items are only farmed if you turn them on.
@@ -51,6 +51,10 @@ The idea comes from [Twitch-Channel-Points-Miner-v2](https://github.com/rdavydov
   instantly through Kick's push service.
 - **Discord notifications** for start/stop, level-ups, claimed rewards and drops, streamers
   going live, and errors.
+- **Rewards are unboxed automatically**, so won emotes and badges are ready to use.
+- **Config changes apply live:** edit `config.toml` while the bot runs, no restart needed.
+- **Health checks:** Docker reports the container as healthy or unhealthy, and an optional
+  heartbeat URL pings healthchecks.io, Uptime Kuma or similar.
 - **Runs anywhere:** Docker image (amd64/arm64, about 24 MB), static Linux binaries and a
   Windows `.exe`.
 
@@ -76,6 +80,8 @@ docker compose logs -f                                # the bot picks the token 
 - `./data` holds `config.toml`, `.kick_token` and `analytics.jsonl`. Edit the config there,
   then run `docker compose restart`.
 - To update, run `docker compose pull && docker compose up -d`.
+- `docker ps` shows the container as `healthy` while the bot farms, and `unhealthy` when it
+  stops (for example while waiting for a new login).
 - The container runs as `PUID`/`PGID` (default 1000) and fixes the ownership of `./data` on start.
 - You can set `KICK_TOKEN` and `KICK_DISCORD_WEBHOOK` in `docker-compose.yml` instead of
   using the files.
@@ -95,8 +101,12 @@ Download from [Releases](https://github.com/jakeayy/kick-level-farm/releases):
 | `kick-level-farm-<tag>-x86_64-pc-windows-msvc.zip` | Windows 10/11 x64 |
 | `SHA256SUMS.txt` | checksums |
 
-- **Stable releases** (`vX.Y.Z`) come out when the version changes.
+- **Stable releases** (`vX.Y.Z`) come out when the version changes. What changed is in
+  [CHANGELOG.md](CHANGELOG.md).
 - **The pre-release** (`dev-<commit>`) is the latest build from `main`.
+- Every download and Docker image has signed build provenance. To check that a file was built
+  by this repo's CI, run
+  `gh attestation verify <file> --repo jakeayy/kick-level-farm`.
 
 **Windows:** extract the zip, open PowerShell or Terminal in that folder, then run:
 
@@ -129,20 +139,22 @@ itself:
 
 ## Configuration
 
-`kick-level-farm init` writes a commented `config.toml`. The defaults work out of the box.
-The options you're most likely to change:
+`kick-level-farm init` writes a commented `config.toml`. The defaults work out of the box,
+and changes are applied while the bot runs (within about 10 seconds). The options you're most
+likely to change:
 
 | Option | Default | What it does |
 |---|---|---|
 | `streamers` | `[]` | Extra channels to farm, in order of preference (followed channels are added automatically) |
-| `[farm] max_concurrent` | `2` | Streams watched at once |
 | `[farm] priority` | `["order"]` | `order`, `points_ascending`, `points_descending`, `viewers_ascending`, `viewers_descending`, `points_enabled` |
 | `[farm] include_followed` | `true` | Farm every channel you follow |
 | `[farm] fallback_to_popular` | `true` | Watch one popular stream for XP when nothing else is live |
 | `[farm] fallback_language` | `"en"` | Language of that popular stream |
+| `[farm] unbox_rewards` | `true` | Open won rewards automatically |
 | `[drops] farm` / `claim` | `true` | Watch drop streams / claim finished drops |
 | `[drops] badges` / `emotes` / `items` | `true` / `true` / `false` | Which reward types to farm |
 | `[drops] exclusive` | `true` | Watch only the drops stream while a drop is in progress |
+| `[health] heartbeat_url` | `""` | URL pinged after every successful check (healthchecks.io, Uptime Kuma push URL, …) |
 
 ### Discord notifications
 
@@ -166,6 +178,8 @@ The `KICK_DISCORD_WEBHOOK` env var works too. Run `kick-level-farm notify-test` 
 | `login` | Save your session token |
 | `status` | Show level, XP, challenges, the drop plan and points per streamer |
 | `notify-test` | Send a test message to your Discord webhook |
+| `health` | Exit 0 if the running bot is alive, 1 if not (used by Docker's health check) |
+| `selftest` | Check that Kick's public API still matches what the bot expects (no login needed) |
 
 Global options: `-c <path>` sets the config file, and `--wait-for-login` waits for a new token
 instead of exiting when the current one expires (Docker uses this).

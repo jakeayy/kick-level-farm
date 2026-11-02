@@ -48,11 +48,11 @@ All runs used the bot only, with no browser open.
 
 What this means:
 
-- **XP is earned per account, not per stream.** It doesn't go up with `max_concurrent`
-  (about 110–120 XP/h).
+- **XP is earned per account, not per stream.** Watching more streams at once doesn't
+  raise it (about 110–120 XP/h).
 - **Channel points are earned per channel** (about 10 every 5 minutes), but **at most 2 channels
-  earn at once**, and the server picks which ones. Keep `max_concurrent = 2` so your priority
-  order decides.
+  earn at once**, and the server picks which ones. That's why the bot watches at most 2 streams
+  (`MAX_CONCURRENT`), so your priority order decides.
 - **Drop watch time is split across concurrently watched streams.** That's why `[drops]
   exclusive = true` is the default.
 - Watch-time challenges count real time once, however many streams you watch.
@@ -89,7 +89,13 @@ src/drops.rs     drop campaign planner (reward type, priority, eligibility)
 src/notify.rs    Discord webhook notifications
 src/miner.rs     orchestrator: live refresh, priority selection, fallback, polling, claiming, analytics
 src/config.rs    TOML config and token handling
+src/selftest.rs  `selftest`: checks Kick's public API with the bot's own types
+tests/fixtures/  trimmed real Kick responses used by the unit tests (`cargo test`)
 Dockerfile, docker/entrypoint.sh, docker-compose.yml   container image + VPS setup
 .github/workflows/docker.yml    multi-arch image → GHCR
 .github/workflows/release.yml   stable releases + dev pre-release (Linux / Windows binaries)
+.github/workflows/ci.yml        fmt, clippy, tests and build on Linux + Windows (required for PRs)
+.github/workflows/kick-canary.yml   nightly check that Kick's API and web player haven't changed
+.github/workflows/codeql.yml, dependencies.yml   CodeQL and cargo-deny security scans
+.github/workflows/claude-triage.yml   automated issue / PR triage
 ```

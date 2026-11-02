@@ -266,9 +266,14 @@ Run all of these before saying a change is done:
 
 ```bash
 cargo fmt --check
-cargo clippy --release -- -D warnings
+cargo clippy --release --all-targets -- -D warnings
+cargo test
 cargo build --release
 ```
+
+CI runs the same checks on Linux and Windows for every pull request, and they're required to
+merge. Add or update unit tests for any logic you change. Response samples live in
+`tests/fixtures/`; keep them trimmed and free of personal data.
 
 Optional checks when relevant:
 
@@ -315,6 +320,14 @@ minutes. If those stop, something is broken.
 Every push to `main` that touches `src/**`, `Cargo.toml` or `Cargo.lock` publishes a `dev-<sha>`
 pre-release and a new Docker image. A **stable release** is published when the `version` in
 `Cargo.toml` changes. Bump it only when the user asks for a release.
+
+Record every user-facing change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+When releasing, rename that section to the new version and date. The release workflow uses it
+as the release notes.
+
+A nightly `kick-canary` workflow runs `kick-level-farm selftest` and checks the web player's
+protocol markers. When Kick changes something, it opens a `kick-api-change` issue. Fix that
+first, and update `RESEARCH.md` along with the code.
 
 ### Automated triage (CI)
 
