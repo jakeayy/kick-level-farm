@@ -10,6 +10,9 @@ name: claude-triage
 #   as plain text.
 # - Claude only returns a JSON verdict. `act` (no Claude involved) applies it: one comment,
 #   labels from a fixed allowlist, and closing on prompt injection / malicious changes.
+# - The verdict is handed to `act` as an artifact, NOT a job output: the runner silently drops
+#   job outputs that it thinks contain a secret ("Skip output ... may contain secret"), which
+#   made `act` skip without commenting.
 # - Never auto-closes items from the owner, members or collaborators.
 on:
   issues:
@@ -37,8 +40,6 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
-    outputs:
-      verdict: ${{ steps.claude.outputs.structured_output }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -154,9 +155,29 @@ jobs:
             Labels (allowlist only): bug, enhancement, question, documentation,
             kick-api-change (Kick changed its API/protocol), needs-info.
 
+      # Step outputs aren't secret-filtered like job outputs, so save the verdict to a file.
+      - name: Save verdict
+        env:
+          VERDICT_JSON: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          mkdir -p .verdict
+          if [ -z "$VERDICT_JSON" ]; then
+            echo "::error::Claude returned no structured output"
+            exit 1
+          fi
+          jq -e 'type == "object" and (.verdict | type == "string")' <<< "$VERDICT_JSON" > /dev/null
+          printf '%s' "$VERDICT_JSON" > .verdict/verdict.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: triage-verdict
+          path: .verdict/verdict.json
+          retention-days: 3
+          if-no-files-found: error
+
   act:
     needs: analyze
-    if: needs.analyze.outputs.verdict != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Write access only here, where no AI runs and no untrusted code executes.
@@ -166,14 +187,19 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      VERDICT_JSON: ${{ needs.analyze.outputs.verdict }}
       IS_PR: ${{ github.event_name == 'pull_request_target' }}
       NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
       ASSOCIATION: ${{ github.event.issue.author_association || github.event.pull_request.author_association }}
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: triage-verdict
+          path: ${{ runner.temp }}/verdict
+
       - name: Apply verdict
         run: |
           set -euo pipefail
+          VERDICT_JSON=$(cat "$RUNNER_TEMP/verdict/verdict.json")
           verdict=$(jq -r '.verdict' <<< "$VERDICT_JSON")
           reason=$(jq -r '.malicious_reason // ""' <<< "$VERDICT_JSON")
 
