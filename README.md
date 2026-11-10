@@ -137,7 +137,8 @@ itself:
 
 1. Log in on [kick.com](https://kick.com).
 2. Open DevTools (F12) and go to Application (Storage in Firefox) → Cookies → `https://kick.com`.
-3. Copy the value of `session_token` (it starts with `kat_`).
+3. Copy the whole value of `session_token`. Depending on the account it starts with `kat_` or
+   looks like `12345678%7C…` (a number, then `%7C`); both work.
 4. Run `kick-level-farm login` and paste it, or set it in the `KICK_TOKEN` env var.
 
 ## Configuration

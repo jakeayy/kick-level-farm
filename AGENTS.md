@@ -20,7 +20,7 @@ There are two parts:
    Kick API and probably goes against Kick's ToS, so the account can be flagged. Continue only
    once they confirm.
 2. **Never handle the session token yourself.** Don't ask the user to paste their
-   `session_token` (`kat_…`) into the chat. Don't print it, log it, put it in a commit, or send
+   `session_token` cookie into the chat. Don't print it, log it, put it in a commit, or send
    it anywhere. The user runs the interactive `login` command themselves (see
    [Step 3](#step-3-log-in-the-user-does-this)).
 3. **Never run anything that needs root** (`sudo`, package managers, installing Docker)
@@ -175,7 +175,8 @@ Tell the user how to get the token:
 
 1. Log in on <https://kick.com>.
 2. Open DevTools (F12) and go to Application (Storage in Firefox) → Cookies → `https://kick.com`.
-3. Copy the value of `session_token` (it starts with `kat_`).
+3. Copy the whole value of `session_token`. Depending on the account it starts with `kat_` or
+   looks like `12345678%7C…` (a number, then `%7C`); both work.
 
 Then have the **user** run the interactive login in their own terminal. It prompts for the token
 and checks it:

@@ -15,6 +15,11 @@ the release workflow uses that section as the release notes.
 - Docker images of releases are tagged with their version (e.g. `0.2.0` and `0.2`), so a
   deployment can be pinned to a release.
 
+### Fixed
+
+- The login instructions no longer claim that the `session_token` always starts with `kat_`.
+  Some accounts have a `12345678%7C…` token instead, which already worked (#2).
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

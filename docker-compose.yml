@@ -12,7 +12,7 @@ services:
       PUID: 1000                # owner of ./data on the host
       PGID: 1000
       # Alternatives to the files in ./data:
-      # KICK_TOKEN: kat_...
+      # KICK_TOKEN: <your session_token cookie>
       # KICK_DISCORD_WEBHOOK: https://discord.com/api/webhooks/...
     stop_grace_period: 30s      # time for the session summary / Discord "stopped" message
     logging:

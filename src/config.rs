@@ -111,7 +111,7 @@ impl Notifications {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
-    /// The `session_token` cookie value (starts with `kat_`). Prefer `token_file` or KICK_TOKEN.
+    /// The `session_token` cookie value (`kat_...` or `<id>%7C<random>`). Prefer `token_file` or KICK_TOKEN.
     pub token: Option<String>,
     /// File holding the token (written by `kick-level-farm login`).
     pub token_file: PathBuf,
@@ -310,7 +310,7 @@ streamers = [
 [auth]
 # Get it from your browser: DevTools -> Application -> Cookies -> kick.com -> session_token
 # or just run `kick-level-farm login`. KICK_TOKEN env var also works.
-# token = "kat_..."
+# token = "kat_..."   (or "12345678%7C...", depending on the account)
 token_file = ".kick_token"
 
 [farm]

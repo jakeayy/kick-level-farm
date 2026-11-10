@@ -220,7 +220,7 @@ async fn login(config_path: &Path) -> Result<()> {
         "Kick login uses captcha + 2FA, so the bot reuses your browser session instead.\n\
          1. Log in on https://kick.com\n\
          2. Open DevTools (F12) -> Application/Storage -> Cookies -> https://kick.com\n\
-         3. Copy the value of `session_token` (starts with `kat_`)\n"
+         3. Copy the whole value of `session_token` (e.g. `kat_...` or `12345678%7C...`)\n"
     );
     print!("session_token: ");
     std::io::stdout().flush()?;
