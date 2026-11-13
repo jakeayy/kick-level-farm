@@ -14,6 +14,8 @@ name: claude-triage
 #   job outputs that it thinks contain a secret ("Skip output ... may contain secret"), which
 #   made `act` skip without commenting.
 # - Never auto-closes items from the owner, members or collaborators.
+# - Items that pass triage (verdict "ok") are assigned to the repository owner so they get a
+#   notification. Only on open/reopen/ready, not on every push, so unassigning sticks.
 on:
   issues:
     types: [opened]
@@ -188,6 +190,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       IS_PR: ${{ github.event_name == 'pull_request_target' }}
+      ACTION: ${{ github.event.action }}
+      OWNER: ${{ github.repository_owner }}
       NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
       ASSOCIATION: ${{ github.event.issue.author_association || github.event.pull_request.author_association }}
     steps:
@@ -241,6 +245,13 @@ jobs:
           for l in "${labels[@]}"; do
             gh api "repos/$REPO/issues/$NUMBER/labels" -f "labels[]=$l" > /dev/null || echo "could not add label $l"
           done
+
+          # Assign valid items to the owner (GitHub notifies the assignee). Skipped on PR pushes
+          # (`synchronize`) so an owner who unassigned themselves isn't re-added.
+          if [ "$verdict" = "ok" ] && [ "$ACTION" != "synchronize" ]; then
+            gh api "repos/$REPO/issues/$NUMBER/assignees" -f "assignees[]=$OWNER" > /dev/null \
+              || echo "::warning::could not assign $OWNER to #$NUMBER"
+          fi
 
           if [ "$verdict" = "malicious" ] && [ "$trusted" = false ]; then
             if [ "$IS_PR" = true ]; then
