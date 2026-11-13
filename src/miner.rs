@@ -9,7 +9,7 @@ use serde_json::json;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
@@ -21,6 +21,10 @@ const DROP_CAMPAIGNS_CACHE: Duration = Duration::from_secs(900);
 const DROP_PROGRESS_CACHE: Duration = Duration::from_secs(300);
 const CATEGORY_CACHE: Duration = Duration::from_secs(300);
 const CONFIG_CHECK: Duration = Duration::from_secs(10);
+/// The final progress check on shutdown must fit Docker's stop grace period (30s).
+const SHUTDOWN_POLL: Duration = Duration::from_secs(8);
+/// `analytics.jsonl` is rotated to `analytics.jsonl.1` past this size.
+const ANALYTICS_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct Streamer {
@@ -44,6 +48,8 @@ struct Streamer {
     configured: bool,
     /// Seen in the followed-channels list.
     followed: bool,
+    /// When `/info` was last fetched (drop planning reuses recent results).
+    checked_at: Option<Instant>,
 }
 
 impl Streamer {
@@ -71,6 +77,40 @@ impl Streamer {
 
     fn viewers(&self) -> u64 {
         self.live.as_ref().map(|l| l.viewer_count).unwrap_or(0)
+    }
+
+    fn recently_checked(&self) -> bool {
+        self.checked_at
+            .is_some_and(|t| t.elapsed() < CATEGORY_CACHE)
+    }
+}
+
+/// Slugs marked as followed that are missing from the latest followed list (unfollowed).
+fn unfollowed(streamers: &HashMap<String, Streamer>, followed: &HashSet<String>) -> Vec<String> {
+    streamers
+        .values()
+        .filter(|s| s.followed && !followed.contains(&s.slug))
+        .map(|s| s.slug.clone())
+        .collect()
+}
+
+/// A timer that waits a full period after a late tick, instead of tokio's default of firing
+/// every missed tick back to back (which piled up requests when Kick was slow).
+fn every(period: Duration) -> tokio::time::Interval {
+    let mut i = tokio::time::interval(period);
+    i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    i
+}
+
+/// Keeps an append-only log bounded: past `max` bytes it's renamed to `<name>.1` (replacing
+/// the previous one) and a fresh file is started.
+fn rotate_if_larger(path: &Path, max: u64) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > max) {
+        let mut old = path.as_os_str().to_owned();
+        old.push(".1");
+        if let Err(e) = std::fs::rename(path, &old) {
+            tracing::debug!("rotating {}: {e}", path.display());
+        }
     }
 }
 
@@ -216,16 +256,28 @@ impl Miner {
             rt_rx = Some(rx);
         }
 
-        let mut refresh =
-            tokio::time::interval(Duration::from_secs(self.cfg.farm.refresh_live_secs));
-        let mut poll = tokio::time::interval(Duration::from_secs(self.cfg.farm.poll_progress_secs));
+        let mut refresh = every(Duration::from_secs(self.cfg.farm.refresh_live_secs));
+        let mut poll = every(Duration::from_secs(self.cfg.farm.poll_progress_secs));
         poll.reset_after(Duration::from_secs(5)); // let refresh run first
         // Set by realtime go-live/offline events: refresh shortly after.
         let mut refresh_soon: Option<tokio::time::Instant> = None;
-        let mut config_check = tokio::time::interval(CONFIG_CHECK);
+        let mut config_check = every(CONFIG_CHECK);
         config_check.reset();
         let ctrl_c = shutdown_signal();
         tokio::pin!(ctrl_c);
+        // Runs a long step (refresh, poll) but stops waiting for it on Ctrl-C / SIGTERM, so a
+        // slow Kick can't hold up shutdown past Docker's grace period.
+        macro_rules! or_shutdown {
+            ($step:expr) => {
+                tokio::select! {
+                    r = $step => r,
+                    _ = &mut ctrl_c => {
+                        tracing::info!("shutdown signal received, stopping…");
+                        break Ok(());
+                    }
+                }
+            };
+        }
 
         let mut started_sent = false;
         let result = loop {
@@ -235,7 +287,7 @@ impl Miner {
                     break Ok(());
                 }
                 _ = refresh.tick() => {
-                    match self.refresh_and_reconcile().await {
+                    match or_shutdown!(self.refresh_and_reconcile()) {
                         Ok(()) => self.write_heartbeat(),
                         Err(e) if api::is_unauthorized(&e) => break Err(e),
                         Err(e) => tracing::warn!("refresh failed: {e:#}"),
@@ -244,9 +296,9 @@ impl Miner {
                 }
                 _ = config_check.tick() => {
                     if self.reload_config_if_changed().await {
-                        refresh = tokio::time::interval(Duration::from_secs(self.cfg.farm.refresh_live_secs));
+                        refresh = every(Duration::from_secs(self.cfg.farm.refresh_live_secs));
                         refresh.reset();
-                        poll = tokio::time::interval(Duration::from_secs(self.cfg.farm.poll_progress_secs));
+                        poll = every(Duration::from_secs(self.cfg.farm.poll_progress_secs));
                         poll.reset();
                         refresh_soon = Some(tokio::time::Instant::now() + Duration::from_secs(1));
                     }
@@ -259,13 +311,13 @@ impl Miner {
                 } => {
                     refresh_soon = None;
                     refresh.reset();
-                    if let Err(e) = self.refresh_and_reconcile().await {
+                    if let Err(e) = or_shutdown!(self.refresh_and_reconcile()) {
                         if api::is_unauthorized(&e) { break Err(e); }
                         tracing::warn!("refresh failed: {e:#}");
                     }
                 }
                 _ = poll.tick() => {
-                    match self.poll_progress().await {
+                    match or_shutdown!(self.poll_progress()) {
                         Ok(()) => {
                             self.write_heartbeat();
                             self.ping_heartbeat();
@@ -310,8 +362,14 @@ impl Miner {
             rt.shutdown();
         }
 
-        // Best-effort final poll for the summary.
-        let _ = self.poll_progress().await;
+        // Best-effort final poll for the summary, bounded so the summary and the "stopped"
+        // notification still go out before the container is killed.
+        if tokio::time::timeout(SHUTDOWN_POLL, self.poll_progress())
+            .await
+            .is_err()
+        {
+            tracing::warn!("final progress check timed out; summary may be slightly behind");
+        }
         let slugs: Vec<String> = self.active.keys().cloned().collect();
         for s in slugs {
             self.stop(&s, "shutdown").await;
@@ -644,6 +702,22 @@ impl Miner {
                             s.live = None;
                         }
                     }
+                    // Unfollowed channels aren't refreshed any more, so their last live state
+                    // would stick (and keep a watch slot on a dead stream). Drop them.
+                    let followed: HashSet<String> =
+                        list.iter().map(|f| f.channel_slug.to_lowercase()).collect();
+                    for slug in unfollowed(&self.streamers, &followed) {
+                        let configured = {
+                            let s = self.streamers.get_mut(&slug).expect("listed above");
+                            s.followed = false;
+                            s.configured
+                        };
+                        if !configured {
+                            tracing::info!("{slug} is no longer followed");
+                            self.stop(&slug, "unfollowed").await;
+                            self.streamers.remove(&slug);
+                        }
+                    }
                     // Only hit /info for followed channels that are actually live.
                     let live: HashSet<String> = list
                         .iter()
@@ -697,6 +771,7 @@ impl Miner {
                 if let Some(s) = self.streamers.get_mut(slug) {
                     s.missing = true;
                     s.live = None;
+                    s.checked_at = Some(Instant::now());
                 }
                 return Ok(());
             }
@@ -707,9 +782,11 @@ impl Miner {
             }
         };
         let need_settings;
+        let need_points;
         {
             let s = self.streamers.get_mut(slug).expect("streamer exists");
             let was_live = s.live.as_ref().is_some_and(|l| l.is_live);
+            s.checked_at = Some(Instant::now());
             s.channel_id = Some(info.id);
             s.banned = info.is_banned;
             s.live = info.livestream.filter(|l| l.is_live);
@@ -735,6 +812,9 @@ impl Miner {
                 rt.watch_channel(info.id);
             }
             need_settings = is_live && s.points_enabled.is_none();
+            // Points are only needed once a channel can be watched (priority, summary), so
+            // they're fetched here instead of for every followed channel on the first poll.
+            need_points = is_live && !s.fallback && s.points.is_none();
         }
         if need_settings && let Ok(ps) = self.client.points_settings(slug).await {
             let s = self.streamers.get_mut(slug).unwrap();
@@ -747,6 +827,17 @@ impl Miner {
                     ps.web_watch_event_interval_seconds,
                     self.interval.as_secs()
                 );
+            }
+        }
+        if need_points {
+            match self.client.points(slug).await {
+                Ok(p) => {
+                    let s = self.streamers.get_mut(slug).expect("streamer exists");
+                    s.start_points.get_or_insert(p);
+                    s.points = Some(p);
+                }
+                Err(e) if api::is_unauthorized(&e) => return Err(e),
+                Err(e) => tracing::debug!("points for {slug}: {e:#}"),
             }
         }
         Ok(())
@@ -1018,14 +1109,22 @@ impl Miner {
                 .collect();
         }
         for slug in pool {
-            self.streamers
+            // Reuse a recent check: otherwise offline participants were fetched again on
+            // every refresh, for every campaign without a live stream.
+            let fresh = self
+                .streamers
                 .entry(slug.clone())
-                .or_insert_with(|| Streamer::new(&slug, usize::MAX, true));
-            self.refresh_one(&slug).await?;
+                .or_insert_with(|| Streamer::new(&slug, usize::MAX, true))
+                .recently_checked();
+            if !fresh {
+                self.refresh_one(&slug).await?;
+            }
             if self.streamers.get(&slug).is_some_and(ok) {
                 return Ok(Some(slug));
             }
-            tokio::time::sleep(POLITE_DELAY).await;
+            if !fresh {
+                tokio::time::sleep(POLITE_DELAY).await;
+            }
         }
         Ok(None)
     }
@@ -1068,7 +1167,7 @@ impl Miner {
                 Err(e) => tracing::warn!("could not fetch popular streams: {e:#}"),
             }
         }
-        // Skip the very top (huge streams), pick from the rest for variety.
+        // Random pick for variety (XP is the same on any stream, big or small).
         let mut pool: Vec<String> = self
             .popular
             .iter()
@@ -1191,17 +1290,15 @@ impl Miner {
         );
         self.last_level = Some(level.clone());
 
-        // Channel points on everything we're watching (+ configured streamers once).
+        // Channel points on what we're watching. Live channels get their first balance in
+        // `refresh_one`; offline ones aren't needed (this used to fetch every followed channel,
+        // and retry the failures on every poll).
         let slugs: Vec<String> = self
-            .streamers
-            .values()
+            .active
+            .keys()
             // Channel points are only farmed/tracked on configured or followed channels.
-            .filter(|s| {
-                !s.fallback
-                    && !s.missing
-                    && (self.active.contains_key(&s.slug) || s.points.is_none())
-            })
-            .map(|s| s.slug.clone())
+            .filter(|k| self.streamers.get(*k).is_some_and(|s| !s.fallback))
+            .cloned()
             .collect();
         for slug in slugs {
             match self.client.points(&slug).await {
@@ -1390,6 +1487,7 @@ impl Miner {
             "watch_events_sent": events,
             "points": points,
         });
+        rotate_if_larger(path, ANALYTICS_MAX_BYTES);
         let res = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1525,11 +1623,10 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
             );
         }
     }
-    if let (Ok(campaigns), Ok(progress)) =
-        (client.drop_campaigns().await, client.drops_progress().await)
-    {
+    let progress = client.drops_progress().await;
+    if let (Ok(campaigns), Ok(progress)) = (client.drop_campaigns().await, &progress) {
         let mut skipped = HashMap::new();
-        let plans = drops::plan(&campaigns, &progress, &cfg.drops, &mut skipped);
+        let plans = drops::plan(&campaigns, progress, &cfg.drops, &mut skipped);
         for p in &plans {
             println!(
                 "drop plan: {:<6} {:<28} {:>5} min left  `{}` ({}){}",
@@ -1549,7 +1646,7 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
             println!("drop plan: {msg}");
         }
     }
-    if let Ok(drops) = client.drops_progress().await {
+    if let Ok(drops) = progress {
         for c in drops {
             for r in c.rewards.iter().filter(|r| !r.claimed) {
                 println!(
@@ -1607,4 +1704,59 @@ pub async fn status(cfg: &Config, client: &KickClient) -> Result<()> {
         tokio::time::sleep(POLITE_DELAY).await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unfollowed_channels_are_detected() {
+        let mut streamers = HashMap::new();
+        for (slug, followed) in [("still", true), ("gone", true), ("configured", false)] {
+            let mut s = Streamer::new(slug, 0, false);
+            s.followed = followed;
+            streamers.insert(slug.to_string(), s);
+        }
+        let list: HashSet<String> = ["still".to_string()].into();
+        assert_eq!(unfollowed(&streamers, &list), ["gone"]);
+        assert!(unfollowed(&streamers, &["still".into(), "gone".into()].into()).is_empty());
+    }
+
+    #[test]
+    fn recent_checks_are_reused() {
+        let mut s = Streamer::new("x", 0, true);
+        assert!(!s.recently_checked());
+        s.checked_at = Some(Instant::now());
+        assert!(s.recently_checked());
+    }
+
+    #[tokio::test]
+    async fn timers_do_not_burst_after_a_slow_step() {
+        let t = every(Duration::from_secs(90));
+        assert_eq!(
+            t.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Delay
+        );
+    }
+
+    #[test]
+    fn analytics_log_is_rotated() {
+        let dir = std::env::temp_dir().join(format!("klf-rotate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("analytics.jsonl");
+        let old = dir.join("analytics.jsonl.1");
+        std::fs::write(&path, "0123456789").unwrap();
+        rotate_if_larger(&path, 10);
+        assert!(path.exists() && !old.exists(), "not over the limit yet");
+        std::fs::write(&path, "0123456789A").unwrap();
+        rotate_if_larger(&path, 10);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "0123456789A");
+        // The next rotation replaces the old file.
+        std::fs::write(&path, "second rotation").unwrap();
+        rotate_if_larger(&path, 10);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "second rotation");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

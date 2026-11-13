@@ -77,7 +77,7 @@ docker compose run --rm kick-level-farm login         # paste your session_token
 docker compose logs -f                                # the bot picks the token up within ~20s
 ```
 
-- `./data` holds `config.toml`, `.kick_token` and `analytics.jsonl`. Edit the config there,
+- `./data` holds `config.toml`, `.kick_token` and `analytics.jsonl` (rotated at 10 MB). Edit the config there,
   then run `docker compose restart`.
 - To update, run `docker compose pull && docker compose up -d`.
 - `latest` follows every update. To stay on a release, set the image in `docker-compose.yml`
@@ -149,7 +149,7 @@ likely to change:
 
 | Option | Default | What it does |
 |---|---|---|
-| `streamers` | `[]` | Extra channels to farm, in order of preference (followed channels are added automatically) |
+| `streamers` | `[]` | Extra channels to farm, in order of preference, as slugs (`xqc`) or channel links (followed channels are added automatically) |
 | `[farm] priority` | `["order"]` | `order`, `points_ascending`, `points_descending`, `viewers_ascending`, `viewers_descending`, `points_enabled` |
 | `[farm] include_followed` | `true` | Farm every channel you follow |
 | `[farm] fallback_to_popular` | `true` | Watch one popular stream for XP when nothing else is live |

@@ -233,16 +233,58 @@ async fn login(config_path: &Path) -> Result<()> {
     let client = api::KickClient::new(token.clone())?;
     let me = client.me().await.context("token check failed")?;
     let path = &cfg.auth.token_file;
-    std::fs::write(path, &token)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_secret(path, &token)?;
     println!(
         "✓ logged in as {} — token saved to {}",
         me.username,
         path.display()
     );
     Ok(())
+}
+
+/// Writes a secret so that it's never readable by others, not even briefly: a new file is
+/// created as 0600, and an existing one is emptied and locked down before the secret goes in.
+fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(secret.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_are_written_owner_only() {
+        let dir = std::env::temp_dir().join(format!("klf-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".kick_token");
+        // An existing, world-readable file gets locked down too.
+        std::fs::write(&path, "old").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        write_secret(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

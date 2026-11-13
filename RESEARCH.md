@@ -21,7 +21,7 @@ when Kick changes its client. Usage docs are in the [README](README.md).
 | Presence socket | `wss://websockets.kick.com/viewer/v1/connect?token=<token>` |
 | Watch event | `{"type":"user_event","data":{"message":{"name":"tracking.user.watch.livestream","channel_id",livestream_id,"vod_id"}}}`, sent when playback starts and then once per `interval` of playing time |
 | Interval | `GET /api/internal/settings/global` → `events["tracking.user.watch.livestream"].interval` (120s). Per-channel: `/api/v2/channels/{slug}/channel-points/channel-settings` → `web_watch_event_interval_seconds` |
-| Keep-alives | `channel_handshake {channelId}` every 15s, `{"type":"ping"}` every 30s (the server answers `pong`), `channel_disconnect` when leaving |
+| Keep-alives | `channel_handshake {channelId}` every 15s, `{"type":"ping"}` every 30s (the server answers each one with `{"type":"pong"}` within ~0.3s and sends nothing unprompted, so the bot reconnects after 75s of silence), `channel_disconnect` when leaving |
 | Stream ids | `GET /api/v2/channels/{slug}/info` → `id`, `livestream.id`, `livestream.vod_id`, `livestream.categories` |
 | Level / XP | `GET https://web.kick.com/api/v1/gamification/user/level` → `level, progress_xp, xp_to_next_level, total_xp` (shown in chat as the `level` badge) |
 | Points | `GET /api/v2/channels/{slug}/points` |
