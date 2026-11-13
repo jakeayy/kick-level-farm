@@ -86,7 +86,12 @@ impl Streamer {
 }
 
 /// Slugs marked as followed that are missing from the latest followed list (unfollowed).
+/// An empty list yields nothing: a malformed reply (Kick answers some requests with `{}`) is
+/// likelier than unfollowing everything, and would drop every channel.
 fn unfollowed(streamers: &HashMap<String, Streamer>, followed: &HashSet<String>) -> Vec<String> {
+    if followed.is_empty() {
+        return Vec::new();
+    }
     streamers
         .values()
         .filter(|s| s.followed && !followed.contains(&s.slug))
@@ -1721,6 +1726,10 @@ mod tests {
         let list: HashSet<String> = ["still".to_string()].into();
         assert_eq!(unfollowed(&streamers, &list), ["gone"]);
         assert!(unfollowed(&streamers, &["still".into(), "gone".into()].into()).is_empty());
+        assert!(
+            unfollowed(&streamers, &HashSet::new()).is_empty(),
+            "an empty (likely malformed) list drops nothing"
+        );
     }
 
     #[test]

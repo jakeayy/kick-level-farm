@@ -285,6 +285,9 @@ impl Task {
         let mut next_ping = now + self.ping_every;
         let mut next_handshake = now + HANDSHAKE_EVERY;
         let mut last_rx = now;
+        // The silence limit only applies once the server has answered in this session, so if
+        // Kick ever stops answering pings the bot doesn't reconnect every 75s instead.
+        let mut heard = false;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
 
         // Initial burst, mirroring the web player: watch event (if due) then handshake.
@@ -338,6 +341,7 @@ impl Task {
                 m = ws.next() => match m {
                     Some(Ok(m)) => {
                         last_rx = Instant::now();
+                        heard = true;
                         match m {
                             Message::Text(t) => self.on_text(&t),
                             Message::Close(f) => {
@@ -351,7 +355,7 @@ impl Task {
                 },
                 _ = tick.tick() => {
                     let now = Instant::now();
-                    if now.duration_since(last_rx) > self.silence_limit {
+                    if heard && now.duration_since(last_rx) > self.silence_limit {
                         return SessionEnd::Dropped(format!(
                             "no reply from the server in {}s",
                             self.silence_limit.as_secs()
@@ -432,17 +436,20 @@ mod tests {
     }
 
     /// Runs one viewer-socket session against a local server and returns how it ended and
-    /// after how long. `answer_pings` makes the server behave like Kick's. Real time with short
+    /// after how long. The server answers the first `pongs` pings, then goes silent like a dead
+    /// connection; `usize::MAX` behaves like Kick. Real time with short
     /// intervals: tokio's paused clock skips ahead of real socket IO, so it can't be used here.
-    async fn session_against_local_server(answer_pings: bool) -> (SessionEnd, Duration) {
+    async fn session_against_local_server(pongs: usize) -> (SessionEnd, Duration) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut pongs_left = pongs;
             while let Some(Ok(m)) = ws.next().await {
-                if answer_pings && m.to_text().is_ok_and(|t| t.contains(r#""ping""#)) {
+                if pongs_left > 0 && m.to_text().is_ok_and(|t| t.contains(r#""ping""#)) {
+                    pongs_left -= 1;
                     let _ = ws.send(msg(json!({"type": "pong"}))).await;
                 }
             }
@@ -489,19 +496,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_silent_connection_is_dropped() {
-        let (end, after) = session_against_local_server(false).await;
+    async fn a_connection_that_goes_silent_is_dropped() {
+        // One pong at ~1s, then nothing: dropped once 2.5s pass without a reply (~4s).
+        let (end, after) = session_against_local_server(1).await;
         match end {
             SessionEnd::Dropped(why) => assert!(why.contains("no reply"), "{why}"),
             _ => panic!("expected the session to be dropped"),
         }
-        let range = Duration::from_millis(2500)..Duration::from_millis(4500);
+        let range = Duration::from_millis(3500)..Duration::from_millis(5500);
         assert!(range.contains(&after), "dropped after {after:?}");
     }
 
     #[tokio::test]
+    async fn a_server_that_never_answers_pings_causes_no_reconnect_loop() {
+        let (end, after) = session_against_local_server(0).await;
+        assert!(
+            matches!(end, SessionEnd::Cancelled),
+            "dropped after {after:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_connection_that_answers_pings_stays_up() {
-        let (end, after) = session_against_local_server(true).await;
+        let (end, after) = session_against_local_server(usize::MAX).await;
         assert!(
             matches!(end, SessionEnd::Cancelled),
             "dropped after {after:?}"
