@@ -1249,11 +1249,11 @@ impl Miner {
             }
         };
         for c in list {
-            let key = format!("{}:{}", c.id, c.status);
-            if c.is_claimable() && !self.claimed.contains(&c.id) {
+            let key = c.claim_key();
+            if c.is_claimable() && !self.claimed.contains(&key) {
                 match self.client.claim_challenge(&c.id).await {
                     Ok(v) => {
-                        self.claimed.insert(c.id.clone());
+                        self.claimed.insert(key);
                         tracing::info!(
                             "🎁 claimed `{}`: {}",
                             c.name,
@@ -1280,7 +1280,7 @@ impl Miner {
                     c.condition.threshold
                 );
             } else {
-                tracing::debug!("challenge `{}` [{key}]", c.name);
+                tracing::debug!("challenge `{}` [{key}] {}", c.name, c.status);
             }
         }
         Ok(())

@@ -17,6 +17,9 @@ the release workflow uses that section as the release notes.
 
 ### Fixed
 
+- The Daily Reward (and other daily challenges) is claimed every day again, not only on the
+  first day after a start. Kick reuses the same challenge id every day, and the bot remembered
+  claims by id alone (#6).
 - The login instructions no longer claim that the `session_token` always starts with `kat_`.
   Some accounts have a `12345678%7C…` token instead, which already worked (#2).
 

@@ -1,4 +1,8 @@
 /target
 .kick_token
-analytics.jsonl
 config.toml
+# Written next to the config while the bot runs.
+*.jsonl
+*.jsonl.1
+.heartbeat
+.heartbeat.tmp
