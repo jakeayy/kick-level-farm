@@ -15,6 +15,14 @@ the release workflow uses that section as the release notes.
 - Docker images of releases are tagged with their version (e.g. `0.2.0` and `0.2`), so a
   deployment can be pinned to a release.
 
+### Changed
+
+- Drop planning reuses channel checks from the last 5 minutes instead of re-checking offline
+  participating channels on every refresh, for every campaign.
+- Channel points are fetched only for channels that are live, not for every followed channel
+  on the first check.
+- `analytics.jsonl` is rotated at 10 MB. The previous file is kept as `analytics.jsonl.1`.
+
 ### Fixed
 
 - The Daily Reward (and other daily challenges) is claimed every day again, not only on the
@@ -22,6 +30,19 @@ the release workflow uses that section as the release notes.
   claims by id alone (#6).
 - The login instructions no longer claim that the `session_token` always starts with `kat_`.
   Some accounts have a `12345678%7C…` token instead, which already worked (#2).
+- An unfollowed channel is dropped right away. Before, the bot could keep a watch slot on it
+  after its stream ended, until it was restarted.
+- A viewer connection that dies silently (router restart, VPN or IP change) is noticed within
+  75 seconds and reconnected. Before, watch time could be lost for up to about 15 minutes.
+- When Kick is slow, delayed refreshes and progress checks no longer run back to back.
+- Stopping the bot (Ctrl+C, `docker stop`) no longer waits for a slow refresh, and the final
+  check is time-limited, so the summary and the "stopped" notification go out in time.
+- Claims and unboxing aren't resent after a timeout. This logged misleading "claiming …
+  failed" warnings when the first attempt had worked.
+- `kick-level-farm login` creates the token file readable only by you from the start. Before,
+  it was briefly readable by other users.
+- Channel links in `streamers` such as `https://kick.com/xqc/`, `kick.com/xqc` or
+  `www.kick.com/xqc` work. Before, they were treated as nonexistent channels.
 
 ## [0.2.0] - 2026-11-02
 

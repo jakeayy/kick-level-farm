@@ -112,12 +112,14 @@ impl Notifier {
         p.push(h);
     }
 
-    /// Wait (bounded) for queued notifications, e.g. before exiting.
+    /// Wait (bounded) for queued notifications, e.g. before exiting. The 10s limit covers all
+    /// of them together, so several slow posts can't outlast Docker's stop grace period.
     pub async fn flush(&self) {
         let Some(inner) = &self.inner else { return };
         let handles: Vec<_> = inner.pending.lock().unwrap().drain(..).collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         for h in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(10), h).await;
+            let _ = tokio::time::timeout_at(deadline, h).await;
         }
     }
 }

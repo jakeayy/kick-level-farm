@@ -328,7 +328,7 @@ impl KickClient {
             let res = req.send().await;
             let res = match res {
                 Ok(r) => r,
-                Err(e) if attempt < 3 => {
+                Err(e) if attempt < 3 && may_retry(&method, None, e.is_connect()) => {
                     tracing::debug!("request {url} failed ({e}), retrying");
                     tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
                     continue;
@@ -354,7 +354,7 @@ impl KickClient {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                 }
                 StatusCode::TOO_MANY_REQUESTS => return Err(ApiError::RateLimited.into()),
-                s if s.is_server_error() && attempt < 3 => {
+                s if s.is_server_error() && attempt < 3 && may_retry(&method, Some(s), false) => {
                     tokio::time::sleep(Duration::from_secs(3 * attempt as u64)).await;
                 }
                 s => {
@@ -628,6 +628,19 @@ impl KickClient {
     }
 }
 
+/// Whether a failed request (network error or 5xx) may be sent again. GETs always. Claims and
+/// other POSTs only when the server can't have acted on the first attempt: the connection
+/// never opened, or a gateway refused it (502/503). A timeout could mean it went through, so
+/// it's left to the caller's next round instead of claiming twice.
+fn may_retry(method: &Method, status: Option<StatusCode>, connect_error: bool) -> bool {
+    *method == Method::GET
+        || connect_error
+        || matches!(
+            status,
+            Some(StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE)
+        )
+}
+
 pub fn is_unauthorized(e: &anyhow::Error) -> bool {
     matches!(e.downcast_ref::<ApiError>(), Some(ApiError::Unauthorized))
 }
@@ -677,6 +690,29 @@ mod tests {
             (l.level, l.progress_xp, l.total_xp, l.xp_to_next_level),
             (13, 219, 2602, 379)
         );
+    }
+
+    #[test]
+    fn posts_are_not_resent_when_they_may_have_gone_through() {
+        let (get, post) = (Method::GET, Method::POST);
+        assert!(may_retry(&get, None, false), "GET: any network error");
+        assert!(may_retry(&get, Some(StatusCode::GATEWAY_TIMEOUT), false));
+        assert!(may_retry(&post, None, true), "connection never opened");
+        assert!(
+            !may_retry(&post, None, false),
+            "e.g. a timeout after sending"
+        );
+        assert!(may_retry(
+            &post,
+            Some(StatusCode::SERVICE_UNAVAILABLE),
+            false
+        ));
+        assert!(!may_retry(
+            &post,
+            Some(StatusCode::INTERNAL_SERVER_ERROR),
+            false
+        ));
+        assert!(!may_retry(&post, Some(StatusCode::GATEWAY_TIMEOUT), false));
     }
 
     #[test]

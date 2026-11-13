@@ -28,6 +28,10 @@ use tokio_util::sync::CancellationToken;
 
 const PING_EVERY: Duration = Duration::from_secs(30);
 const HANDSHAKE_EVERY: Duration = Duration::from_secs(15);
+/// The server answers every `ping` with `pong` (within ~0.3s) and sends nothing on its own,
+/// so silence for two ping rounds means the connection is dead even if writes still succeed
+/// (they would until TCP gives up, ~15 min on Linux).
+const SILENCE_LIMIT: Duration = Duration::from_secs(75);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchTarget {
@@ -85,6 +89,8 @@ impl Connection {
             label,
             targets: HashMap::new(),
             seen_types: HashSet::new(),
+            ping_every: PING_EVERY,
+            silence_limit: SILENCE_LIMIT,
         };
         let join = tokio::spawn(task.run(rx, cancel.clone()));
         Self { tx, cancel, join }
@@ -117,6 +123,9 @@ struct Task {
     label: String,
     targets: HashMap<u64, Slot>,
     seen_types: HashSet<String>,
+    /// [`PING_EVERY`] / [`SILENCE_LIMIT`] (shorter in tests).
+    ping_every: Duration,
+    silence_limit: Duration,
 }
 
 type Ws =
@@ -201,6 +210,8 @@ impl Task {
 
             match self.session(ws, &mut rx, &cancel).await {
                 SessionEnd::Cancelled | SessionEnd::ChannelClosed => return,
+                // Nothing left to watch (shared socket): wait for a target, no reconnect.
+                SessionEnd::Idle => {}
                 SessionEnd::Dropped(reason) => {
                     tracing::info!(
                         "[{}] viewer socket dropped ({reason}); reconnecting",
@@ -271,8 +282,12 @@ impl Task {
         cancel: &CancellationToken,
     ) -> SessionEnd {
         let now = Instant::now();
-        let mut next_ping = now + PING_EVERY;
+        let mut next_ping = now + self.ping_every;
         let mut next_handshake = now + HANDSHAKE_EVERY;
+        let mut last_rx = now;
+        // The silence limit only applies once the server has answered in this session, so if
+        // Kick ever stops answering pings the bot doesn't reconnect every 75s instead.
+        let mut heard = false;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
 
         // Initial burst, mirroring the web player: watch event (if due) then handshake.
@@ -319,26 +334,38 @@ impl Task {
                         }
                         if self.targets.is_empty() {
                             let _ = ws.close(None).await;
-                            return SessionEnd::Dropped("no targets".into());
+                            return SessionEnd::Idle;
                         }
                     }
                 },
                 m = ws.next() => match m {
-                    Some(Ok(Message::Text(t))) => self.on_text(&t),
-                    Some(Ok(Message::Close(f))) => {
-                        return SessionEnd::Dropped(format!("closed by server: {f:?}"));
+                    Some(Ok(m)) => {
+                        last_rx = Instant::now();
+                        heard = true;
+                        match m {
+                            Message::Text(t) => self.on_text(&t),
+                            Message::Close(f) => {
+                                return SessionEnd::Dropped(format!("closed by server: {f:?}"));
+                            }
+                            _ => {}
+                        }
                     }
-                    Some(Ok(_)) => {}
                     Some(Err(e)) => return SessionEnd::Dropped(e.to_string()),
                     None => return SessionEnd::Dropped("stream ended".into()),
                 },
                 _ = tick.tick() => {
                     let now = Instant::now();
+                    if heard && now.duration_since(last_rx) > self.silence_limit {
+                        return SessionEnd::Dropped(format!(
+                            "no reply from the server in {}s",
+                            self.silence_limit.as_secs()
+                        ));
+                    }
                     if now >= next_ping {
                         if let Err(e) = ws.send(msg(json!({"type":"ping"}))).await {
                             return SessionEnd::Dropped(e.to_string());
                         }
-                        next_ping = now + PING_EVERY;
+                        next_ping = now + self.ping_every;
                     }
                     if self.handshake && now >= next_handshake {
                         for id in self.targets.keys() {
@@ -392,6 +419,8 @@ impl Task {
 enum SessionEnd {
     Cancelled,
     ChannelClosed,
+    /// The last target was removed; the socket was closed on purpose.
+    Idle,
     Dropped(String),
 }
 
@@ -404,6 +433,96 @@ mod tests {
             Message::Text(t) => serde_json::from_str(t.as_str()).unwrap(),
             other => panic!("expected text, got {other:?}"),
         }
+    }
+
+    /// Runs one viewer-socket session against a local server and returns how it ended and
+    /// after how long. The server answers the first `pongs` pings, then goes silent like a dead
+    /// connection; `usize::MAX` behaves like Kick. Real time with short
+    /// intervals: tokio's paused clock skips ahead of real socket IO, so it can't be used here.
+    async fn session_against_local_server(pongs: usize) -> (SessionEnd, Duration) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut pongs_left = pongs;
+            while let Some(Ok(m)) = ws.next().await {
+                if pongs_left > 0 && m.to_text().is_ok_and(|t| t.contains(r#""ping""#)) {
+                    pongs_left -= 1;
+                    let _ = ws.send(msg(json!({"type": "pong"}))).await;
+                }
+            }
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        let mut task = Task {
+            client: KickClient::new(String::new()).unwrap(),
+            interval: Duration::from_secs(120),
+            handshake: true,
+            stats: Arc::default(),
+            label: "test".into(),
+            targets: HashMap::new(),
+            seen_types: HashSet::new(),
+            ping_every: Duration::from_secs(1),
+            silence_limit: Duration::from_millis(2500),
+        };
+        let target = WatchTarget {
+            slug: "x".into(),
+            channel_id: 1,
+            livestream_id: 2,
+            vod_id: "v".into(),
+        };
+        task.targets.insert(
+            1,
+            Slot {
+                target,
+                next_event: Instant::now(),
+            },
+        );
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        // Stop a healthy session after 6s (several ping rounds).
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            stop.cancel();
+        });
+        let start = Instant::now();
+        let end = task.session(ws, &mut rx, &cancel).await;
+        server.abort();
+        (end, start.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_goes_silent_is_dropped() {
+        // One pong at ~1s, then nothing: dropped once 2.5s pass without a reply (~4s).
+        let (end, after) = session_against_local_server(1).await;
+        match end {
+            SessionEnd::Dropped(why) => assert!(why.contains("no reply"), "{why}"),
+            _ => panic!("expected the session to be dropped"),
+        }
+        let range = Duration::from_millis(3500)..Duration::from_millis(5500);
+        assert!(range.contains(&after), "dropped after {after:?}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_pings_causes_no_reconnect_loop() {
+        let (end, after) = session_against_local_server(0).await;
+        assert!(
+            matches!(end, SessionEnd::Cancelled),
+            "dropped after {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_answers_pings_stays_up() {
+        let (end, after) = session_against_local_server(usize::MAX).await;
+        assert!(
+            matches!(end, SessionEnd::Cancelled),
+            "dropped after {after:?}"
+        );
     }
 
     #[test]

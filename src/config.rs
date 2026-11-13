@@ -229,11 +229,7 @@ impl Config {
         cfg.streamers = cfg
             .streamers
             .iter()
-            .map(|s| {
-                s.trim()
-                    .trim_start_matches("https://kick.com/")
-                    .to_lowercase()
-            })
+            .map(|s| normalize_slug(s))
             .filter(|s| !s.is_empty())
             .collect();
         if let Some(n) = cfg.farm.max_concurrent.take()
@@ -291,6 +287,20 @@ impl Config {
     }
 }
 
+/// Turns what people paste into `streamers` into a bare channel slug: `xqc`, `XQC`,
+/// `https://kick.com/xqc/`, `kick.com/xqc`, `www.kick.com/xqc?ref=x` and `@xqc` all give `xqc`.
+pub fn normalize_slug(s: &str) -> String {
+    let s = s.trim().to_lowercase();
+    let s = s.split_once("://").map_or(s.as_str(), |(_, rest)| rest);
+    let s = s.strip_prefix("www.").unwrap_or(s);
+    let s = s.strip_prefix("kick.com/").unwrap_or(s);
+    let s = s.trim_start_matches(['/', '@']);
+    s.split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Accepts the raw cookie value, a URL-encoded one, or a `Bearer ...` string.
 pub fn normalize_token(t: &str) -> String {
     let t = t.trim().trim_start_matches("Bearer ").trim();
@@ -301,7 +311,7 @@ pub fn normalize_token(t: &str) -> String {
 pub const EXAMPLE_CONFIG: &str = r#"# kick-level-farm configuration
 
 # Extra channels to farm on top of the ones you follow, in order of preference
-# (slug = the part after kick.com/). Listed channels come before followed ones.
+# (the slug after kick.com/, or the whole channel link). Listed channels come before followed ones.
 streamers = [
     # "xqc",
     # "trainwreckstv",
@@ -340,7 +350,8 @@ shared_socket = false
 # points (the server credits by elapsed time). It only makes the account look less normal.
 # watch_event_interval_secs = 60
 send_handshake = true
-# JSON-lines log of every progress poll, for measuring XP/hour.
+# JSON-lines log of every progress poll, for measuring XP/hour. Rotated at 10 MB
+# (the previous file is kept as analytics.jsonl.1).
 analytics_file = "analytics.jsonl"
 
 [drops]
@@ -433,5 +444,23 @@ mod tests {
         assert_eq!(normalize_token("Bearer kat_abc"), "kat_abc");
         assert_eq!(normalize_token("session_token=kat_abc"), "kat_abc");
         assert_eq!(normalize_token("123%7Cabc"), "123|abc");
+    }
+
+    #[test]
+    fn slug_normalisation() {
+        for raw in [
+            "xqc",
+            " XQC ",
+            "https://kick.com/xqc",
+            "https://kick.com/xqc/",
+            "http://www.kick.com/xqc?ref=home",
+            "kick.com/xqc",
+            "www.kick.com/xqc#chat",
+            "@xqc",
+            "https://kick.com/xqc/videos",
+        ] {
+            assert_eq!(normalize_slug(raw), "xqc", "{raw:?}");
+        }
+        assert_eq!(normalize_slug("https://kick.com/"), "");
     }
 }
