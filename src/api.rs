@@ -121,6 +121,16 @@ pub struct Challenge {
     pub name: String,
     pub status: String,
     pub condition: ChallengeCondition,
+    /// The period this instance of the challenge runs in. Recurring challenges keep the same
+    /// `id` every day and only move this window.
+    #[serde(default)]
+    pub window: Option<ChallengeWindow>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChallengeWindow {
+    #[serde(default)]
+    pub starts_at: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +153,16 @@ impl Challenge {
             s.as_str(),
             "completed" | "claimable" | "ready" | "ready_to_claim"
         ) || (self.condition.threshold > 0 && self.condition.progress >= self.condition.threshold)
+    }
+
+    /// Identifies one claimable instance of the challenge. Kick reuses the `id` of recurring
+    /// challenges (the Daily Reward has the same id every day), so the id alone would block
+    /// every claim after the first one.
+    pub fn claim_key(&self) -> String {
+        match self.window.as_ref().map(|w| w.starts_at.as_str()) {
+            Some(start) if !start.is_empty() => format!("{}@{start}", self.id),
+            _ => self.id.clone(),
+        }
     }
 }
 
@@ -670,6 +690,24 @@ mod tests {
         );
         assert!(!by_id("claimed").is_claimable(), "already claimed");
         assert_eq!(by_id("daily").condition.kind, "watch_time_minutes");
+    }
+
+    #[test]
+    fn challenge_claim_key_changes_per_window() {
+        // Kick reuses the Daily Reward's id every day (#6); only the window moves.
+        let list = fixture::<Data<Vec<Challenge>>>("challenges.json").data;
+        let today = list.iter().find(|c| c.id == "daily").unwrap().clone();
+        assert_eq!(today.claim_key(), "daily@2026-11-13T00:00:00Z");
+        let tomorrow = Challenge {
+            window: Some(ChallengeWindow {
+                starts_at: "2026-11-14T00:00:00Z".into(),
+            }),
+            ..today.clone()
+        };
+        assert_ne!(today.claim_key(), tomorrow.claim_key());
+        // Without a window, the id is all there is.
+        let done = list.iter().find(|c| c.id == "done").unwrap();
+        assert_eq!(done.claim_key(), "done");
     }
 
     #[test]
